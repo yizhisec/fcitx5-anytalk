@@ -1,0 +1,43 @@
+#pragma once
+#include <functional>
+#include <string>
+#include <thread>
+#include <atomic>
+#include <mutex>
+
+class IpcClient {
+public:
+  using TextCb = std::function<void(const std::string &)>;
+
+  IpcClient();
+  void start();
+  void stop();
+
+  void sendStart();
+  void sendStop();
+  void sendCancel();
+
+  void setCallbacks(TextCb partial, TextCb final, TextCb status);
+
+private:
+  void connectSocket();
+  void recvLoop();
+  void sendJson(const std::string &json);
+  void closeSocketLocked();
+
+  // Helper methods for recvLoop()
+  bool ensureConnected();
+  bool receiveData(char* buffer, size_t buffer_size, ssize_t& bytes_read);
+  void processMessages();
+  void handleJsonMessage(const std::string& line);
+
+  int sock_{-1};
+  std::mutex sock_mutex_;
+  std::string recv_buffer_;
+  std::thread recv_thread_;
+  std::atomic<bool> running_{false};
+
+  TextCb on_partial_;
+  TextCb on_final_;
+  TextCb on_status_;
+};
