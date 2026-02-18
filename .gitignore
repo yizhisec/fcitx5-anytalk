@@ -1,3 +1,4 @@
 /build
-anytalk-daemon/target/
 *.log
+anytalk-lib/.zig-cache/
+anytalk-lib/zig-out/
