@@ -6,15 +6,19 @@
 #include <fcitx-config/configuration.h>
 #include <fcitx-config/iniparser.h>
 #include <mutex>
-#include "ipc_client.h"
-#include "daemon_manager.h"
+#include <fcitx-utils/eventdispatcher.h>
+#include <atomic>
+#include <memory>
+#include <thread>
+
+extern "C" {
+#include "anytalk_api.h"
+}
 
 FCITX_CONFIGURATION(
     AnyTalkConfig,
     fcitx::Option<std::string> appId{this, "AppID", "Volcengine App ID"};
     fcitx::Option<std::string> accessToken{this, "AccessToken", "Volcengine Access Token"};
-    fcitx::Option<bool> developerMode{this, "DeveloperMode", "Developer Mode (Do not auto-start daemon)", false};
-    fcitx::Option<std::string> daemonPath{this, "DaemonPath", "Path to anytalk-daemon executable", "/usr/bin/anytalk-daemon"};
 );
 
 class AnyTalkEngine;
@@ -24,7 +28,6 @@ public:
     AnyTalkStatusAction(AnyTalkEngine *engine);
     std::string shortText(fcitx::InputContext *ic) const override;
     std::string icon(fcitx::InputContext *ic) const override;
-    // We can also implement activate() here if clicking the icon should toggle recording!
 private:
     AnyTalkEngine *engine_;
 };
@@ -39,7 +42,7 @@ public:
                   fcitx::InputContextEvent &event) override;
   void keyEvent(const fcitx::InputMethodEntry &entry,
                 fcitx::KeyEvent &event) override;
-  
+
   void setConfig(const fcitx::RawConfig &config) override;
   void reloadConfig() override;
   const fcitx::Configuration *getConfig() const override { return &config_; }
@@ -47,36 +50,31 @@ public:
   void updatePreedit(const std::string &text);
   void commitText(const std::string &text);
   void setStatus(const std::string &state);
-  void startDaemon();
-  
+  fcitx::InputContext *resolveIC();
+
   // V2 Overrides for Main Icon/Label
   std::string subModeIconImpl(const fcitx::InputMethodEntry &entry, fcitx::InputContext &ic) override;
   std::string subModeLabelImpl(const fcitx::InputMethodEntry &entry, fcitx::InputContext &ic) override;
-
-  // Accessors for StatusAction
-  bool isRecording() const {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    return recording_;
-  }
-  std::string connectionState() const {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    return current_state_;
-  }
 
   // Helper methods for status display
   std::string getStatusLabel() const;
   std::string getStatusIcon() const;
 
+  // Static callback for Zig library
+  static void zigCallback(void *user_data, AnytalkEventType type, const char *text);
+
 private:
+  void startAsync();
+  void stopAsync();
+
   fcitx::Instance *instance_;
-  IpcClient ipc_;
+  fcitx::EventDispatcher dispatcher_;
+  std::shared_ptr<AnytalkContext> zig_ctx_;
   AnyTalkConfig config_;
-  DaemonManager daemon_manager_;
-  bool recording_{false};
-  bool ignore_next_commit_{false};
-  std::string last_text_;
   std::string current_state_{"idle"};
   fcitx::InputContext *active_ic_{nullptr};
   std::unique_ptr<AnyTalkStatusAction> statusAction_;
   mutable std::mutex state_mutex_;  // Protects recording_, current_state_, active_ic_
+  std::shared_ptr<std::atomic_bool> start_in_flight_{std::make_shared<std::atomic_bool>(false)};
+  std::shared_ptr<std::atomic_bool> stop_in_flight_{std::make_shared<std::atomic_bool>(false)};
 };

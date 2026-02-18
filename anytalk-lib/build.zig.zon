@@ -1,0 +1,11 @@
+.{
+    .name = .anytalk_lib,
+    .version = "0.2.0",
+    .fingerprint = 0x38dc1535db67eef9,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "include",
+    },
+}

@@ -7,7 +7,6 @@
 #include <fcitx-utils/log.h>
 #include <fcitx/statusarea.h>
 #include <fcitx-utils/keysymgen.h>
-#include <regex>
 #include <fcitx/userinterface.h>
 
 // --- AnyTalkStatusAction Implementation ---
@@ -28,7 +27,7 @@ std::string AnyTalkStatusAction::icon(fcitx::InputContext *ic) const {
 // Helper methods for status display
 std::string AnyTalkEngine::getStatusLabel() const {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    if (recording_) return Constants::LABEL_RECORDING;
+    if (current_state_ == Constants::STATE_RECORDING) return Constants::LABEL_RECORDING;
     if (current_state_ == Constants::STATE_CONNECTING) return Constants::LABEL_CONNECTING;
     if (current_state_ == Constants::STATE_CONNECTED) return Constants::LABEL_READY;
     return Constants::LABEL_DEFAULT;
@@ -36,42 +35,64 @@ std::string AnyTalkEngine::getStatusLabel() const {
 
 std::string AnyTalkEngine::getStatusIcon() const {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    if (recording_) return Constants::ICON_RECORDING;
+    if (current_state_ == Constants::STATE_RECORDING) return Constants::ICON_RECORDING;
     return Constants::ICON_DEFAULT;
+}
+
+// Static callback from Zig library - dispatches to main thread
+void AnyTalkEngine::zigCallback(void *user_data, AnytalkEventType type, const char *text) {
+    auto *engine = static_cast<AnyTalkEngine *>(user_data);
+    if (!engine || !engine->instance_) return;
+
+    std::string text_str(text ? text : "");
+    engine->dispatcher_.schedule([engine, type, text_str]() {
+        switch (type) {
+        case ANYTALK_EVENT_PARTIAL:
+            engine->updatePreedit(text_str);
+            break;
+        case ANYTALK_EVENT_FINAL:
+            engine->commitText(text_str);
+            break;
+        case ANYTALK_EVENT_STATUS:
+            engine->setStatus(text_str);
+            break;
+        case ANYTALK_EVENT_ERROR:
+            FCITX_ERROR() << "AnyTalk error: " << text_str;
+            engine->setStatus(Constants::STATE_IDLE);
+            break;
+        }
+    });
 }
 
 AnyTalkEngine::AnyTalkEngine(fcitx::Instance *instance)
   : instance_(instance) {
-  ipc_.setCallbacks(
-    [this](const std::string &text) {
-      if (!instance_) return;
-      instance_->eventDispatcher().schedule([this, text]() {
-        updatePreedit(text);
-      });
-    },
-    [this](const std::string &text) {
-      if (!instance_) return;
-      instance_->eventDispatcher().schedule([this, text]() {
-        commitText(text);
-      });
-    },
-    [this](const std::string &state) {
-      if (!instance_) return;
-      instance_->eventDispatcher().schedule([this, state]() {
-        setStatus(state);
-      });
-    }
-  );
-  ipc_.start();
+  dispatcher_.attach(&instance_->eventLoop());
 
   statusAction_ = std::make_unique<AnyTalkStatusAction>(this);
-  
+
   reloadConfig();
-  startDaemon();
+
+  // Initialize Zig library
+  AnytalkConfig zig_config{};
+  std::string appId = *config_.appId;
+  std::string accessToken = *config_.accessToken;
+  zig_config.app_id = appId.c_str();
+  zig_config.access_token = accessToken.c_str();
+  zig_config.resource_id = nullptr; // Use default
+  zig_config.mode = nullptr;        // Use default
+
+  AnytalkContext *raw_ctx = anytalk_init(&zig_config, zigCallback, this);
+  if (!raw_ctx) {
+    FCITX_ERROR() << "Failed to initialize AnyTalk Zig library";
+  } else {
+    zig_ctx_.reset(raw_ctx, [](AnytalkContext *ctx) {
+      anytalk_destroy(ctx);
+    });
+  }
 }
 
 AnyTalkEngine::~AnyTalkEngine() {
-  ipc_.stop();
+  zig_ctx_.reset();
 }
 
 // Helper to trigger UI refresh
@@ -80,12 +101,7 @@ void AnyTalkEngine::setStatus(const std::string &state) {
     std::lock_guard<std::mutex> lock(state_mutex_);
     current_state_ = state;
     if (state == Constants::STATE_IDLE) {
-      recording_ = false;
       active_ic_ = nullptr;
-    } else if (state == Constants::STATE_CONNECTED) {
-      recording_ = false;
-    } else if (state == Constants::STATE_RECORDING) {
-      recording_ = true;
     }
   }
 
@@ -94,7 +110,6 @@ void AnyTalkEngine::setStatus(const std::string &state) {
      if (ic) {
          statusAction_->update(ic);
          ic->updateUserInterface(fcitx::UserInterfaceComponent::StatusArea);
-         // Also update input panel if needed, but StatusArea covers icons/labels
      }
   }
 }
@@ -106,20 +121,6 @@ std::string AnyTalkEngine::subModeIconImpl(const fcitx::InputMethodEntry &, fcit
 
 std::string AnyTalkEngine::subModeLabelImpl(const fcitx::InputMethodEntry &, fcitx::InputContext &) {
     return getStatusLabel();
-}
-
-void AnyTalkEngine::startDaemon() {
-    std::string daemonPath = *config_.daemonPath;
-    if (daemonPath.empty()) {
-        daemonPath = "anytalk-daemon";
-    }
-
-    daemon_manager_.start(
-        daemonPath,
-        *config_.appId,
-        *config_.accessToken,
-        *config_.developerMode
-    );
 }
 
 void AnyTalkEngine::setConfig(const fcitx::RawConfig &config) {
@@ -135,7 +136,7 @@ void AnyTalkEngine::activate(const fcitx::InputMethodEntry &, fcitx::InputContex
     auto *ic = event.inputContext();
     if (!ic) return;
     ic->statusArea().addAction(fcitx::StatusGroup::InputMethod, statusAction_.get());
-    
+
     // Refresh UI on activate
     statusAction_->update(ic);
 }
@@ -153,82 +154,80 @@ void AnyTalkEngine::keyEvent(const fcitx::InputMethodEntry &, fcitx::KeyEvent &e
   }
 
   auto *ic = event.inputContext();
-
-  // Enter key
-  bool is_recording = false;
+  bool is_recording;
+  std::string state;
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    is_recording = recording_;
+    state = current_state_;
+    is_recording = (state == Constants::STATE_RECORDING);
   }
 
+  // Enter key stops recording
   if (event.key().sym() == FcitxKey_Return && is_recording) {
-      FCITX_DEBUG() << "Enter pressed, stopping recording";
-      ipc_.sendStop();
-
-      // Update UI immediately
-      setStatus(Constants::STATE_IDLE); // This triggers refresh and updates recording_ safely
+      stopAsync();
+      setStatus(Constants::STATE_IDLE);
       event.accept();
       return;
   }
 
-  // F2 or Media Play key
+  // F2 or Media Play toggles recording
   if (event.key().sym() == FcitxKey_F2 || event.key().sym() == FcitxKey_AudioPlay) {
-    bool should_start = false;
-    std::string state;
-    {
-      std::lock_guard<std::mutex> lock(state_mutex_);
-      should_start = !recording_;
-      state = current_state_;
-      if (should_start) {
+    if (!is_recording) {
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
         active_ic_ = ic;
       }
-    }
-
-    if (should_start) {
-      ignore_next_commit_ = false;
-      ipc_.sendStart();
+      startAsync();
       if (state != Constants::STATE_CONNECTED) {
           setStatus(Constants::STATE_CONNECTING);
       }
     } else {
-      ipc_.sendStop();
-      setStatus(Constants::STATE_IDLE); // Optimistic update
+      stopAsync();
+      setStatus(Constants::STATE_IDLE);
     }
     event.accept();
     return;
   }
 }
 
-void AnyTalkEngine::updatePreedit(const std::string &text) {
-  if (!instance_) return;
+void AnyTalkEngine::startAsync() {
+  auto ctx = zig_ctx_;
+  if (!ctx) return;
+  auto flag = start_in_flight_;
+  if (flag->exchange(true)) return;
+  std::thread([flag, ctx]() {
+    anytalk_start(ctx.get());
+    flag->store(false);
+  }).detach();
+}
 
-  last_text_ = text;
+void AnyTalkEngine::stopAsync() {
+  auto ctx = zig_ctx_;
+  if (!ctx) return;
+  auto flag = stop_in_flight_;
+  if (flag->exchange(true)) return;
+  std::thread([flag, ctx]() {
+    anytalk_stop(ctx.get());
+    flag->store(false);
+  }).detach();
+}
+
+fcitx::InputContext *AnyTalkEngine::resolveIC() {
+  if (!instance_) return nullptr;
   auto *focused = instance_->inputContextManager().lastFocusedInputContext();
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  return active_ic_ ? (active_ic_ == focused ? active_ic_ : nullptr) : focused;
+}
 
-  fcitx::InputContext *ic = nullptr;
-  {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    ic = active_ic_ ? (active_ic_ == focused ? active_ic_ : nullptr) : focused;
-  }
-
+void AnyTalkEngine::updatePreedit(const std::string &text) {
+  auto *ic = resolveIC();
   if (!ic) return;
-  fcitx::Text preedit(text);
-  ic->inputPanel().setClientPreedit(preedit);
+  ic->inputPanel().setClientPreedit(fcitx::Text(text));
   ic->updatePreedit();
 }
 
 void AnyTalkEngine::commitText(const std::string &text) {
-  if (ignore_next_commit_) return;
-  if (!instance_) return;
-  last_text_ = "";
-  auto *focused = instance_->inputContextManager().lastFocusedInputContext();
-
-  fcitx::InputContext *ic = nullptr;
-  {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    ic = active_ic_ ? (active_ic_ == focused ? active_ic_ : nullptr) : focused;
-  }
-
+  auto *ic = resolveIC();
   if (!ic) return;
   ic->commitString(text);
   ic->inputPanel().setClientPreedit(fcitx::Text());

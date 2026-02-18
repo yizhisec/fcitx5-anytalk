@@ -6,67 +6,67 @@ include(GNUInstallDirs)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Version information
-set(ANYTALK_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
-set(ANYTALK_VERSION_MINOR ${PROJECT_VERSION_MINOR})
-set(ANYTALK_VERSION_PATCH ${PROJECT_VERSION_PATCH})
-set(ANYTALK_VERSION "${PROJECT_VERSION}")
-
-# Build options
-option(BUILD_DAEMON "Build Rust daemon" ON)
-option(DAEMON_DEBUG "Build daemon in debug mode" OFF)
+# Prefer system prefix and multiarch libdir when not explicitly set by user.
+if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+    set(CMAKE_INSTALL_PREFIX "/usr" CACHE PATH "Default install prefix" FORCE)
+endif()
+if(CMAKE_INSTALL_LIBDIR STREQUAL "lib" AND DEFINED CMAKE_LIBRARY_ARCHITECTURE)
+    set(CMAKE_INSTALL_LIBDIR "lib/${CMAKE_LIBRARY_ARCHITECTURE}" CACHE STRING "Default libdir" FORCE)
+endif()
 
 find_package(Fcitx5Core REQUIRED)
 find_package(Fcitx5Utils REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(JSONC REQUIRED json-c)
 
-if(BUILD_DAEMON)
-    find_program(CARGO_EXECUTABLE cargo)
-    if(NOT CARGO_EXECUTABLE)
-        message(FATAL_ERROR "cargo not found")
-    endif()
+# Zig build
+find_program(ZIG_EXECUTABLE zig REQUIRED)
 
-    if(DAEMON_DEBUG)
-        set(CARGO_BUILD_ARGS "build")
-        set(DAEMON_BUILD_DIR "debug")
-    else()
-        set(CARGO_BUILD_ARGS "build" "--release")
-        set(DAEMON_BUILD_DIR "release")
-    endif()
+set(ZIG_LIB_DIR "${CMAKE_SOURCE_DIR}/anytalk-lib")
+set(ZIG_OUTPUT_DIR "${ZIG_LIB_DIR}/zig-out/lib")
+set(ZIG_LIB_FILE "${ZIG_OUTPUT_DIR}/libanytalk.so")
 
-    add_custom_target(anytalk-daemon-build ALL
-        COMMAND ${CARGO_EXECUTABLE} ${CARGO_BUILD_ARGS}
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/anytalk-daemon
-        COMMENT "Building Rust daemon (${DAEMON_BUILD_DIR})"
-    )
-endif()
+add_custom_command(
+    OUTPUT ${ZIG_LIB_FILE}
+    COMMAND ${ZIG_EXECUTABLE} build -Doptimize=ReleaseFast
+    WORKING_DIRECTORY ${ZIG_LIB_DIR}
+    COMMENT "Building Zig library (libanytalk.so)"
+    DEPENDS
+        ${ZIG_LIB_DIR}/src/api.zig
+        ${ZIG_LIB_DIR}/src/context.zig
+        ${ZIG_LIB_DIR}/src/audio.zig
+        ${ZIG_LIB_DIR}/src/websocket.zig
+        ${ZIG_LIB_DIR}/src/tls.zig
+        ${ZIG_LIB_DIR}/src/protocol.zig
+        ${ZIG_LIB_DIR}/src/asr.zig
+        ${ZIG_LIB_DIR}/src/json.zig
+        ${ZIG_LIB_DIR}/src/uuid.zig
+        ${ZIG_LIB_DIR}/build.zig
+)
+
+add_custom_target(anytalk-zig-build ALL DEPENDS ${ZIG_LIB_FILE})
 
 add_library(anytalk MODULE
     src/addon.cpp
-    src/ipc_client.cpp
-    src/daemon_manager.cpp
 )
 
-if(BUILD_DAEMON)
-    add_dependencies(anytalk anytalk-daemon-build)
-endif()
+add_dependencies(anytalk anytalk-zig-build)
 
 target_include_directories(anytalk PRIVATE
     ${Fcitx5Core_INCLUDE_DIRS}
     ${Fcitx5Utils_INCLUDE_DIRS}
-    ${JSONC_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/anytalk-lib/include
 )
 
 target_link_libraries(anytalk
     Fcitx5::Core
     Fcitx5::Utils
-    ${JSONC_LIBRARIES}
+    ${ZIG_LIB_FILE}
 )
 
 set_target_properties(anytalk PROPERTIES
     PREFIX ""
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib/fcitx5"
+    INSTALL_RPATH "${CMAKE_INSTALL_FULL_LIBDIR}"
+    BUILD_WITH_INSTALL_RPATH TRUE
 )
 
 # Explicit list of icon files (no GLOB)
@@ -81,8 +81,4 @@ install(FILES data/anytalk.conf DESTINATION ${CMAKE_INSTALL_DATADIR}/fcitx5/inpu
 install(FILES data/anytalk-addon.conf DESTINATION ${CMAKE_INSTALL_DATADIR}/fcitx5/addon RENAME anytalk.conf)
 install(FILES ${ICON_FILES} DESTINATION ${CMAKE_INSTALL_DATADIR}/fcitx5/icons)
 install(FILES ${ICON_FILES} DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/48x48/apps)
-
-if(BUILD_DAEMON)
-    install(PROGRAMS anytalk-daemon/target/${DAEMON_BUILD_DIR}/anytalk-daemon
-        DESTINATION ${CMAKE_INSTALL_BINDIR})
-endif()
+install(FILES ${ZIG_LIB_FILE} DESTINATION ${CMAKE_INSTALL_LIBDIR})
