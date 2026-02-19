@@ -168,6 +168,7 @@ pub const AnytalkContext = struct {
             sessionCallback,
             @ptrCast(self),
             &self.audio_target,
+            &self.pool,
         );
 
         try session.start();

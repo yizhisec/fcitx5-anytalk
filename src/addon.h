@@ -47,10 +47,7 @@ public:
   void reloadConfig() override;
   const fcitx::Configuration *getConfig() const override { return &config_; }
 
-  void updatePreedit(const std::string &text);
-  void commitText(const std::string &text);
   void setStatus(const std::string &state);
-  fcitx::InputContext *resolveIC();
 
   // V2 Overrides for Main Icon/Label
   std::string subModeIconImpl(const fcitx::InputMethodEntry &entry, fcitx::InputContext &ic) override;
@@ -66,15 +63,18 @@ public:
 private:
   void startAsync();
   void stopAsync();
+  void updatePreedit(const std::string &text);
+  void commitText(const std::string &text);
 
   fcitx::Instance *instance_;
   fcitx::EventDispatcher dispatcher_;
   std::shared_ptr<AnytalkContext> zig_ctx_;
   AnyTalkConfig config_;
   std::string current_state_{"idle"};
+  std::string pending_text_;
   fcitx::InputContext *active_ic_{nullptr};
   std::unique_ptr<AnyTalkStatusAction> statusAction_;
-  mutable std::mutex state_mutex_;  // Protects recording_, current_state_, active_ic_
+  mutable std::mutex state_mutex_;  // Protects current_state_, pending_text_, active_ic_
   std::shared_ptr<std::atomic_bool> start_in_flight_{std::make_shared<std::atomic_bool>(false)};
   std::shared_ptr<std::atomic_bool> stop_in_flight_{std::make_shared<std::atomic_bool>(false)};
 };

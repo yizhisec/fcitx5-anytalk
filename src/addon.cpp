@@ -95,23 +95,31 @@ AnyTalkEngine::~AnyTalkEngine() {
   zig_ctx_.reset();
 }
 
-// Helper to trigger UI refresh
 void AnyTalkEngine::setStatus(const std::string &state) {
+  std::string text_to_commit;
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     current_state_ = state;
     if (state == Constants::STATE_IDLE) {
+      text_to_commit = std::move(pending_text_);
+      pending_text_.clear();
       active_ic_ = nullptr;
     }
   }
 
-  if (instance_) {
-     auto *ic = instance_->inputContextManager().lastFocusedInputContext();
-     if (ic) {
-         statusAction_->update(ic);
-         ic->updateUserInterface(fcitx::UserInterfaceComponent::StatusArea);
-     }
+  if (!instance_) return;
+  auto *ic = instance_->inputContextManager().lastFocusedInputContext();
+  if (!ic) return;
+
+  if (state == Constants::STATE_IDLE) {
+    if (!text_to_commit.empty()) {
+      ic->commitString(text_to_commit);
+    }
+    ic->inputPanel().setPreedit(fcitx::Text());
+    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
   }
+  statusAction_->update(ic);
+  ic->updateUserInterface(fcitx::UserInterfaceComponent::StatusArea);
 }
 
 // V2 Overrides for Main Icon/Label
@@ -212,26 +220,25 @@ void AnyTalkEngine::stopAsync() {
   }).detach();
 }
 
-fcitx::InputContext *AnyTalkEngine::resolveIC() {
-  if (!instance_) return nullptr;
+void AnyTalkEngine::updatePreedit(const std::string &text) {
+  if (!instance_) return;
   auto *focused = instance_->inputContextManager().lastFocusedInputContext();
   std::lock_guard<std::mutex> lock(state_mutex_);
-  return active_ic_ ? (active_ic_ == focused ? active_ic_ : nullptr) : focused;
-}
-
-void AnyTalkEngine::updatePreedit(const std::string &text) {
-  auto *ic = resolveIC();
+  auto *ic = active_ic_ ? (active_ic_ == focused ? active_ic_ : nullptr) : focused;
   if (!ic) return;
-  ic->inputPanel().setClientPreedit(fcitx::Text(text));
-  ic->updatePreedit();
+  ic->inputPanel().setPreedit(fcitx::Text(pending_text_ + text));
+  ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
 }
 
 void AnyTalkEngine::commitText(const std::string &text) {
-  auto *ic = resolveIC();
+  if (!instance_) return;
+  auto *focused = instance_->inputContextManager().lastFocusedInputContext();
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  auto *ic = active_ic_ ? (active_ic_ == focused ? active_ic_ : nullptr) : focused;
   if (!ic) return;
-  ic->commitString(text);
-  ic->inputPanel().setClientPreedit(fcitx::Text());
-  ic->updatePreedit();
+  pending_text_ += text;
+  ic->inputPanel().setPreedit(fcitx::Text(pending_text_));
+  ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
 }
 
 class AnyTalkFactory : public fcitx::AddonFactory {

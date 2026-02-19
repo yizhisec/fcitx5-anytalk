@@ -132,6 +132,7 @@ pub const Session = struct {
     callback: *const fn (event_type: u32, text: [*c]const u8, user_data: ?*anyopaque) void,
     user_data: ?*anyopaque,
     audio_target: *audio_mod.AudioTarget,
+    pool: *ConnectionPool,
     thread: ?std.Thread,
     running: std.atomic.Value(bool),
     /// Ring buffer for audio chunks from capture thread
@@ -144,6 +145,7 @@ pub const Session = struct {
         callback: *const fn (event_type: u32, text: [*c]const u8, user_data: ?*anyopaque) void,
         user_data: ?*anyopaque,
         audio_target: *audio_mod.AudioTarget,
+        pool: *ConnectionPool,
     ) Session {
         return Session{
             .ws = ws,
@@ -152,6 +154,7 @@ pub const Session = struct {
             .callback = callback,
             .user_data = user_data,
             .audio_target = audio_target,
+            .pool = pool,
             .thread = null,
             .running = std.atomic.Value(bool).init(false),
             .audio_ring = .{},
@@ -187,8 +190,7 @@ pub const Session = struct {
     }
 
     fn emitEvent(self: *Session, event_type: u32, text: []const u8) void {
-        // Create null-terminated copy
-        var buf: [4096]u8 = undefined;
+        var buf: [16384]u8 = undefined;
         const len = @min(text.len, buf.len - 1);
         @memcpy(buf[0..len], text[0..len]);
         buf[len] = 0;
@@ -196,19 +198,31 @@ pub const Session = struct {
     }
 
     fn sessionLoop(self: *Session) void {
-        self.runSession() catch |err| {
-            log.err("Session error: {any}", .{err});
-            self.emitEvent(3, "session error"); // ANYTALK_EVENT_ERROR
-        };
-        // Session done - emit idle status
-        self.emitEvent(2, "idle"); // ANYTALK_EVENT_STATUS
+        while (self.running.load(.acquire)) {
+            self.runSession() catch |err| {
+                log.err("Session error: {any}", .{err});
+                self.emitEvent(3, "session error");
+                break;
+            };
+            if (!self.running.load(.acquire)) break;
+            if (!self.audio_target.isActive()) break; // User stopped, drain complete
+            // Server ended session - reconnect
+            log.info("Server ended session, reconnecting...", .{});
+            self.ws.close();
+            self.ws = self.pool.take() orelse
+                (connectToAsr(self.allocator, &self.cfg) catch |err| {
+                    log.err("Reconnect failed: {any}", .{err});
+                    break;
+                });
+        }
+        self.ws.close();
+        self.emitEvent(2, "idle");
     }
 
     fn runSession(self: *Session) !void {
         log.info("Starting ASR session", .{});
 
-        // Set a read timeout so the loop can check the running flag periodically
-        self.ws.tls.setReadTimeout(200);
+        self.ws.tls.setReadTimeout(10);
 
         // Send initial request JSON
         const req_json = try json_mod.buildInitialRequest(self.allocator, self.cfg.mode);
@@ -228,35 +242,35 @@ pub const Session = struct {
         var audio_done = false;
 
         while (self.running.load(.acquire)) {
-            // Try to read audio and send it
+            // Drain all queued audio chunks
             if (!audio_done) {
-                if (self.audio_ring.pop()) |chunk| {
+                var sent_any = false;
+                while (self.audio_ring.pop()) |chunk| {
+                    sent_any = true;
                     chunk_count += 1;
-                    if (chunk_count % 20 == 0) {
+                    if (chunk_count % 100 == 0) {
                         log.info("Sent {d} audio chunks to ASR...", .{chunk_count});
                     }
                     const frame = protocol.buildAudioOnlyRequest(self.allocator, &chunk, false) catch continue;
                     defer self.allocator.free(frame);
                     self.ws.sendBinary(frame) catch {
                         audio_done = true;
+                        break;
                     };
-                } else {
-                    // No audio available, check if target was cleared (stop signal)
-                    if (!self.audio_target.isActive()) {
-                        log.info("Audio source stopped (Stop received)", .{});
-                        // Send empty final frame
-                        const final_frame = protocol.buildAudioOnlyRequest(self.allocator, &.{}, true) catch {
-                            audio_done = true;
-                            continue;
-                        };
-                        defer self.allocator.free(final_frame);
-                        self.ws.sendBinary(final_frame) catch {};
+                }
+                if (!sent_any and !self.audio_target.isActive()) {
+                    log.info("Audio source stopped (Stop received)", .{});
+                    const final_frame = protocol.buildAudioOnlyRequest(self.allocator, &.{}, true) catch {
                         audio_done = true;
-                    }
+                        continue;
+                    };
+                    defer self.allocator.free(final_frame);
+                    self.ws.sendBinary(final_frame) catch {};
+                    audio_done = true;
                 }
             }
 
-            // Try to read WebSocket response (200ms SO_RCVTIMEO on socket)
+            // Try to read WebSocket response
             const frame = self.ws.readFrame() catch |err| {
                 switch (err) {
                     error.WouldBlock => continue, // Timeout, check running flag
@@ -322,8 +336,6 @@ pub const Session = struct {
         if (last_full_text.len > 0) {
             self.allocator.free(last_full_text);
         }
-
-        self.ws.close();
     }
 };
 

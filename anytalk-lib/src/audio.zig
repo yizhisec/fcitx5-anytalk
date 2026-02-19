@@ -6,8 +6,8 @@ const c = @cImport({
     @cInclude("pulse/error.h");
 });
 
-/// Audio chunk: 200ms at 16kHz mono S16LE = 3200 samples = 6400 bytes
-pub const CHUNK_BYTES: usize = 6400;
+/// Audio chunk: 40ms at 16kHz mono S16LE = 640 samples = 1280 bytes
+pub const CHUNK_BYTES: usize = 1280;
 
 pub const AudioTarget = struct {
     mutex: std.Thread.Mutex = .{},
@@ -57,6 +57,13 @@ pub const AudioCapture = struct {
         if (self.running.load(.acquire)) return;
 
         var pa_err: c_int = 0;
+        const buf_attr = c.pa_buffer_attr{
+            .maxlength = std.math.maxInt(u32),
+            .tlength = std.math.maxInt(u32),
+            .prebuf = std.math.maxInt(u32),
+            .minreq = std.math.maxInt(u32),
+            .fragsize = CHUNK_BYTES, // Minimize capture latency
+        };
         self.pa = c.pa_simple_new(
             null,
             "anytalk",
@@ -65,7 +72,7 @@ pub const AudioCapture = struct {
             "Voice Input",
             &c.pa_sample_spec{ .format = c.PA_SAMPLE_S16LE, .rate = 16000, .channels = 1 },
             null,
-            null,
+            &buf_attr,
             &pa_err,
         );
         if (self.pa == null) {
