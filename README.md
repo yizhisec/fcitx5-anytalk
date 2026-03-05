@@ -12,23 +12,21 @@ Fcitx5 语音输入插件，使用 ASR（自动语音识别）实现语音转文
 ## 系统要求
 
 - Fcitx5
-- CMake 3.16+
+- CMake 3.10+
 - 支持 C++20 的编译器
-- Rust 1.70+（用于构建 daemon）
-- ALSA 开发库
-- json-c 库
+- Zig（用于构建 anytalk-lib）
 
 ### Debian/Ubuntu
 
 ```bash
-sudo apt install fcitx5 fcitx5-modules-dev cmake build-essential \
-    libasound2-dev libjson-c-dev cargo
+sudo apt install fcitx5 fcitx5-modules-dev cmake build-essential
+# Zig 需要从 https://ziglang.org/download/ 单独安装
 ```
 
 ### Arch Linux
 
 ```bash
-sudo pacman -S fcitx5 cmake base-devel alsa-lib json-c rust
+sudo pacman -S fcitx5 cmake base-devel zig
 ```
 
 ## 构建
@@ -37,21 +35,11 @@ sudo pacman -S fcitx5 cmake base-devel alsa-lib json-c rust
 # 配置
 cmake -S . -B build
 
-# 构建（包括 C++ 插件和 Rust daemon）
+# 构建（包括 C++ 插件和 Zig 共享库）
 cmake --build build
 
 # 安装（可能需要 sudo）
 cmake --install build
-```
-
-### 构建选项
-
-- `BUILD_DAEMON`（默认：ON）- 构建 Rust daemon
-- `DAEMON_DEBUG`（默认：OFF）- 以调试模式构建 daemon
-
-```bash
-# 示例：跳过 daemon 构建
-cmake -S . -B build -DBUILD_DAEMON=OFF
 ```
 
 ## 配置
@@ -91,12 +79,13 @@ cmake -S . -B build -DBUILD_DAEMON=OFF
 1. **fcitx5-anytalk**（C++ 共享库）
    - Fcitx5 输入法引擎
    - 处理键盘事件和文字输入
-   - 通过 Unix socket 与 daemon 通信
+   - 通过 C API 调用 anytalk-lib
 
-2. **anytalk-daemon**（Rust 二进制程序）
-   - 音频采集和处理
-   - WebSocket 连接 ASR 服务
-   - 实时转写
+2. **anytalk-lib**（Zig 共享库 `libanytalk.so`）
+   - 音频采集（ALSA）
+   - WebSocket/TLS 连接火山引擎 ASR 服务
+   - 实时语音转写
+   - 通过回调函数将结果传递给 C++ 层
 
 ## 开发
 
@@ -106,15 +95,22 @@ cmake -S . -B build -DBUILD_DAEMON=OFF
 fcitx5-anytalk/
 ├── src/                    # C++ 插件源码
 │   ├── addon.cpp/h        # 主引擎实现
-│   ├── ipc_client.cpp/h   # Unix socket IPC 客户端
-│   ├── daemon_manager.cpp/h # Daemon 生命周期管理
-│   └── constants.h        # 字符串常量
-├── anytalk-daemon/        # Rust daemon
-│   └── src/
-│       ├── main.rs        # 入口点
-│       ├── audio.rs       # 音频采集
-│       ├── asr.rs         # ASR WebSocket 客户端
-│       └── ...
+│   └── constants.h        # 状态标签和图标常量
+├── anytalk-lib/           # Zig 共享库
+│   ├── include/
+│   │   └── anytalk_api.h  # C API 头文件
+│   ├── src/
+│   │   ├── api.zig        # C API 导出层
+│   │   ├── context.zig    # 上下文管理
+│   │   ├── audio.zig      # ALSA 音频采集
+│   │   ├── asr.zig        # ASR 转写逻辑
+│   │   ├── websocket.zig  # WebSocket 协议实现
+│   │   ├── tls.zig        # TLS 加密通信
+│   │   ├── protocol.zig   # ASR 协议编解码
+│   │   ├── json.zig       # JSON 解析
+│   │   └── uuid.zig       # UUID 生成
+│   ├── build.zig          # Zig 构建配置
+│   └── build.zig.zon      # Zig 包描述
 ├── data/                  # 配置和资源
 │   ├── anytalk.conf       # 输入法配置
 │   ├── anytalk-addon.conf # 插件配置
@@ -125,22 +121,12 @@ fcitx5-anytalk/
 ### 运行测试
 
 ```bash
-# Rust 测试
-cd anytalk-daemon
-cargo test
+# Zig 测试
+cd anytalk-lib
+zig build test
 
 # 手动构建和测试
 cmake --build build
-./anytalk-daemon/target/release/anytalk-daemon
-```
-
-### 开发者模式
-
-在配置中启用开发者模式，可手动启动 daemon 进行调试：
-
-```bash
-# 手动启动 daemon 并开启日志
-RUST_LOG=debug ./anytalk-daemon/target/release/anytalk-daemon
 ```
 
 ## 致谢
