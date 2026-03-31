@@ -8,6 +8,22 @@
 #include <fcitx/statusarea.h>
 #include <fcitx-utils/keysymgen.h>
 #include <fcitx/userinterface.h>
+#include <fcitx-utils/dbus/bus.h>
+
+// Declare the DBusModule function we need
+FCITX_ADDON_DECLARE_FUNCTION(DBusModule, bus, fcitx::dbus::Bus *());
+
+// --- AnyTalkDBus Implementation ---
+
+AnyTalkDBus::AnyTalkDBus(AnyTalkEngine *engine) : engine_(engine) {}
+
+void AnyTalkDBus::emitStateChanged(const std::string &state) {
+    stateChanged(state);
+}
+
+std::string AnyTalkDBus::getState() {
+    return engine_->getState();
+}
 
 // --- AnyTalkStatusAction Implementation ---
 
@@ -37,6 +53,11 @@ std::string AnyTalkEngine::getStatusIcon() const {
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (current_state_ == Constants::STATE_RECORDING) return Constants::ICON_RECORDING;
     return Constants::ICON_DEFAULT;
+}
+
+std::string AnyTalkEngine::getState() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return current_state_;
 }
 
 // Static callback from Zig library - dispatches to main thread
@@ -89,10 +110,66 @@ AnyTalkEngine::AnyTalkEngine(fcitx::Instance *instance)
       anytalk_destroy(ctx);
     });
   }
+
+  // Initialize D-Bus
+  auto *dbusAddon = dbus();
+  if (dbusAddon) {
+    auto *bus = dbusAddon->call<fcitx::IDBusModule::bus>();
+    if (bus) {
+      dbusObject_ = std::make_unique<AnyTalkDBus>(this);
+      bus->addObjectVTable(Constants::DBUS_PATH, Constants::DBUS_INTERFACE, *dbusObject_);
+      bus->requestName(Constants::DBUS_SERVICE, fcitx::dbus::RequestNameFlag{});
+    }
+  }
+
+  // Register global key event watcher (PreInputMethod phase)
+  eventWatcher_ = instance_->watchEvent(
+      fcitx::EventType::InputContextKeyEvent,
+      fcitx::EventWatcherPhase::PreInputMethod,
+      [this](fcitx::Event &event) { handleGlobalKeyEvent(event); });
 }
 
 AnyTalkEngine::~AnyTalkEngine() {
   zig_ctx_.reset();
+}
+
+void AnyTalkEngine::handleGlobalKeyEvent(fcitx::Event &event) {
+  auto &keyEvent = static_cast<fcitx::KeyEvent &>(event);
+
+  if (keyEvent.isRelease()) {
+    return;
+  }
+
+  bool is_recording;
+  std::string state;
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    state = current_state_;
+    is_recording = (state == Constants::STATE_RECORDING);
+  }
+
+  // Enter key stops recording (only when recording)
+  if (keyEvent.key().sym() == FcitxKey_Return && is_recording) {
+      stopAsync();
+      setStatus(Constants::STATE_IDLE);
+      keyEvent.accept();
+      return;
+  }
+
+  // F2 or Media Play toggles recording
+  if (keyEvent.key().sym() == FcitxKey_F2 || keyEvent.key().sym() == FcitxKey_AudioPlay) {
+    if (!is_recording) {
+      startAsync();
+      if (state != Constants::STATE_CONNECTED) {
+          setStatus(Constants::STATE_CONNECTING);
+      }
+    } else {
+      stopAsync();
+      setStatus(Constants::STATE_IDLE);
+    }
+    keyEvent.accept();
+    return;
+  }
 }
 
 void AnyTalkEngine::setStatus(const std::string &state) {
@@ -103,8 +180,12 @@ void AnyTalkEngine::setStatus(const std::string &state) {
     if (state == Constants::STATE_IDLE) {
       text_to_commit = std::move(pending_text_);
       pending_text_.clear();
-      active_ic_ = nullptr;
     }
+  }
+
+  // Emit D-Bus signal
+  if (dbusObject_) {
+    dbusObject_->emitStateChanged(state);
   }
 
   if (!instance_) return;
@@ -117,18 +198,14 @@ void AnyTalkEngine::setStatus(const std::string &state) {
     }
     ic->inputPanel().setPreedit(fcitx::Text());
     ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+    // Remove status action when idle
+    ic->statusArea().removeAction(statusAction_.get());
+  } else if (state == Constants::STATE_RECORDING || state == Constants::STATE_CONNECTING || state == Constants::STATE_CONNECTED) {
+    // Add status action when active
+    ic->statusArea().addAction(fcitx::StatusGroup::InputMethod, statusAction_.get());
   }
   statusAction_->update(ic);
   ic->updateUserInterface(fcitx::UserInterfaceComponent::StatusArea);
-}
-
-// V2 Overrides for Main Icon/Label
-std::string AnyTalkEngine::subModeIconImpl(const fcitx::InputMethodEntry &, fcitx::InputContext &) {
-    return getStatusIcon();
-}
-
-std::string AnyTalkEngine::subModeLabelImpl(const fcitx::InputMethodEntry &, fcitx::InputContext &) {
-    return getStatusLabel();
 }
 
 void AnyTalkEngine::setConfig(const fcitx::RawConfig &config) {
@@ -138,64 +215,6 @@ void AnyTalkEngine::setConfig(const fcitx::RawConfig &config) {
 
 void AnyTalkEngine::reloadConfig() {
     fcitx::readAsIni(config_, "conf/anytalk.conf");
-}
-
-void AnyTalkEngine::activate(const fcitx::InputMethodEntry &, fcitx::InputContextEvent &event) {
-    auto *ic = event.inputContext();
-    if (!ic) return;
-    ic->statusArea().addAction(fcitx::StatusGroup::InputMethod, statusAction_.get());
-
-    // Refresh UI on activate
-    statusAction_->update(ic);
-}
-
-void AnyTalkEngine::deactivate(const fcitx::InputMethodEntry &, fcitx::InputContextEvent &event) {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    if (event.inputContext() == active_ic_) {
-        active_ic_ = nullptr;
-    }
-}
-
-void AnyTalkEngine::keyEvent(const fcitx::InputMethodEntry &, fcitx::KeyEvent &event) {
-  if (event.isRelease()) {
-    return;
-  }
-
-  auto *ic = event.inputContext();
-  bool is_recording;
-  std::string state;
-  {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    state = current_state_;
-    is_recording = (state == Constants::STATE_RECORDING);
-  }
-
-  // Enter key stops recording
-  if (event.key().sym() == FcitxKey_Return && is_recording) {
-      stopAsync();
-      setStatus(Constants::STATE_IDLE);
-      event.accept();
-      return;
-  }
-
-  // F2 or Media Play toggles recording
-  if (event.key().sym() == FcitxKey_F2 || event.key().sym() == FcitxKey_AudioPlay) {
-    if (!is_recording) {
-      {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        active_ic_ = ic;
-      }
-      startAsync();
-      if (state != Constants::STATE_CONNECTED) {
-          setStatus(Constants::STATE_CONNECTING);
-      }
-    } else {
-      stopAsync();
-      setStatus(Constants::STATE_IDLE);
-    }
-    event.accept();
-    return;
-  }
 }
 
 void AnyTalkEngine::startAsync() {
@@ -222,21 +241,56 @@ void AnyTalkEngine::stopAsync() {
 
 void AnyTalkEngine::updatePreedit(const std::string &text) {
   if (!instance_) return;
-  auto *focused = instance_->inputContextManager().lastFocusedInputContext();
-  std::lock_guard<std::mutex> lock(state_mutex_);
-  auto *ic = active_ic_ ? (active_ic_ == focused ? active_ic_ : nullptr) : focused;
+  auto *ic = instance_->inputContextManager().lastFocusedInputContext();
   if (!ic) return;
+  std::lock_guard<std::mutex> lock(state_mutex_);
   ic->inputPanel().setPreedit(fcitx::Text(pending_text_ + text));
   ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
 }
 
+// Helper function to remove trailing punctuation from text
+static std::string removeTrailingPunctuation(std::string text) {
+  // Common Chinese and English punctuation marks
+  static const char* punctuations[] = {
+    "，", "。", "！", "？", "、", "；", "：",  // Chinese
+    ",", ".", "!", "?", ";", ":",            // English
+    nullptr
+  };
+
+  while (!text.empty()) {
+    bool removed = false;
+
+    // Check for Chinese punctuation (UTF-8, 3 bytes)
+    for (int i = 0; punctuations[i] != nullptr; ++i) {
+      const char* p = punctuations[i];
+      size_t pLen = strlen(p);
+      if (text.size() >= pLen && text.compare(text.size() - pLen, pLen, p) == 0) {
+        text.erase(text.size() - pLen);
+        removed = true;
+        break;
+      }
+    }
+
+    if (!removed) {
+      break;
+    }
+  }
+
+  return text;
+}
+
 void AnyTalkEngine::commitText(const std::string &text) {
   if (!instance_) return;
-  auto *focused = instance_->inputContextManager().lastFocusedInputContext();
-  std::lock_guard<std::mutex> lock(state_mutex_);
-  auto *ic = active_ic_ ? (active_ic_ == focused ? active_ic_ : nullptr) : focused;
+  auto *ic = instance_->inputContextManager().lastFocusedInputContext();
   if (!ic) return;
-  pending_text_ += text;
+
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  std::string processedText = text;
+  if (*config_.removeTrailingPunctuation) {
+    processedText = removeTrailingPunctuation(text);
+  }
+
+  pending_text_ += processedText;
   ic->inputPanel().setPreedit(fcitx::Text(pending_text_));
   ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
 }

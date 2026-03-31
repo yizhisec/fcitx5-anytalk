@@ -16,4 +16,9 @@ namespace Constants {
     // Icons
     inline constexpr const char* ICON_RECORDING = "media-record";
     inline constexpr const char* ICON_DEFAULT = "anytalk";
+
+    // D-Bus
+    inline constexpr const char* DBUS_SERVICE = "org.fcitx.Fcitx5.AnyTalk";
+    inline constexpr const char* DBUS_PATH = "/anytalk";
+    inline constexpr const char* DBUS_INTERFACE = "org.fcitx.Fcitx5.AnyTalk";
 }
