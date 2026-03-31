@@ -77,7 +77,6 @@ set(ICON_FILES
 
 # Install rules using GNUInstallDirs
 install(TARGETS anytalk DESTINATION ${CMAKE_INSTALL_LIBDIR}/fcitx5)
-install(FILES data/anytalk.conf DESTINATION ${CMAKE_INSTALL_DATADIR}/fcitx5/inputmethod)
 install(FILES data/anytalk-addon.conf DESTINATION ${CMAKE_INSTALL_DATADIR}/fcitx5/addon RENAME anytalk.conf)
 install(FILES ${ICON_FILES} DESTINATION ${CMAKE_INSTALL_DATADIR}/fcitx5/icons)
 install(FILES ${ICON_FILES} DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/48x48/apps)
