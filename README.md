@@ -1,5 +1,18 @@
 # fcitx5-anytalk
 
+> Fork of [yizhisec/fcitx5-anytalk](https://github.com/yizhisec/fcitx5-anytalk)
+
+## Fork 改动
+
+相比上游仓库，本 fork 做了以下改动：
+
+- **全局热键语音输入**：将插件类型从 InputMethod 改为 Module，在任意输入法状态下按 F2 即可开始语音输入，无需先切换到 AnyTalk 输入法
+- **D-Bus 状态接口**：新增 D-Bus 接口（`org.fcitx.Fcitx5.AnyTalk`），暴露录音状态属性（`State`）和状态变更信号（`StateChanged`），方便外部工具（如 waybar）集成
+
+---
+
+
+
 Fcitx5 语音输入插件，使用 ASR（自动语音识别）实现语音转文字输入。
 
 ## 功能特性
