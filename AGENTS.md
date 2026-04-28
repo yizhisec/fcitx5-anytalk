@@ -40,3 +40,21 @@
 - `anytalk-addon.conf` ships with `Configurable=False`; fcitx5-config-qt does not expose a settings page.
 - D-Bus session-bus activation auto-launches the overlay on first method call. To make activation work on Sway / wlroots, the addon pushes WAYLAND_DISPLAY etc. into the bus daemon at load time via `UpdateActivationEnvironment`.
 - The legacy `org.fcitx.Fcitx5.AnyTalk` `StateChanged` D-Bus signal is preserved for waybar custom-module integrations.
+
+## Volcengine ASR Protocol Notes
+- One ws = one session: server kicks idle ws within seconds; can't reuse across F2 presses.
+- Every frame must carry a sequence (`POS_SEQUENCE` / `NEG_WITH_SEQUENCE`); mixing seq/no-seq frames triggers server error `decode V1 protocol message autoAssignedSequence`.
+- Audio packets ~100-200ms each (≈6400 bytes @ 16kHz S16LE); larger packets get silently dropped server-side. Slice handshake-buffered audio before flushing.
+- Reference: official Python demo `sauc_websocket_demo.py` — canonical answer for protocol questions; mirrors our `VolcengineProtocol.cpp` layout.
+
+## PulseAudio Capture Notes
+- PA suspends idle sources after a few seconds; next stream open ships ~1s of *absolute zero* PCM padding (rms == 0, not even noise floor).
+- `AudioCapture` keeps the PA stream open and the read thread running for the lifetime of the overlay so the source never suspends; `start()/stop()` only flip an `active_` flag controlling whether reads are emitted.
+- PA may recycle long-lived streams behind us; `pa_simple_read` failure puts the thread into a dead state — next `start()` detects and rebuilds.
+- The PA client identity is the overlay process, **not** the focused application. Switching applications does not affect our capture path.
+
+## Debug Recipes
+- Coredump backtrace: `coredumpctl info fcitx5` for stack; `coredumpctl debug PID --debugger-arguments="-batch -x cmds.txt"` for scripted gdb (registers, disasm).
+- Resolve a libFcitx5Core offset: `nm -D /usr/lib/libFcitx5Core.so.7 | sort` + `objdump -d --start-address=X --stop-address=Y -C lib.so` for the crash site.
+- Watch overlay D-Bus signals live: `busctl --user monitor org.fcitx.Fcitx5.AnyTalk.Overlay`.
+- Stale install residue lives in `/usr/local/share/fcitx5/` from prior CMake default-prefix builds — check there if fcitx5 sees a phantom addon name.
