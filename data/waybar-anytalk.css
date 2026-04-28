@@ -1,0 +1,60 @@
+/*
+ * waybar-anytalk.css — sample styling for a Waybar custom module
+ * that reads AnyTalk's D-Bus state (org.fcitx.Fcitx5.AnyTalk).
+ *
+ * Pair this with a waybar `custom/anytalk` module whose script emits
+ * `{"text": "REC", "alt": "recording", "class": "recording"}` (and idle/
+ * ready/connecting equivalents) — the `class` field is what these
+ * selectors match on.
+ *
+ * The "breathing" effect on the recording state avoids the need to swap
+ * frame PNGs from C++; the static icon stays put and CSS does the work.
+ */
+
+#custom-anytalk {
+  padding: 0 8px;
+  margin: 0 4px;
+  border-radius: 6px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+  color: #c8ccd4;
+  background: rgba(255, 255, 255, 0.04);
+  transition: background-color 200ms ease, color 200ms ease;
+}
+
+#custom-anytalk.idle {
+  color: #8a8f9c;
+}
+
+#custom-anytalk.ready {
+  color: #7fe3b0;
+  background: rgba(127, 227, 176, 0.10);
+}
+
+#custom-anytalk.connecting {
+  color: #ffc56b;
+  background: rgba(255, 197, 107, 0.10);
+  animation: anytalk-connecting-pulse 1.4s ease-in-out infinite;
+}
+
+#custom-anytalk.recording {
+  color: #ff5c6a;
+  background: rgba(255, 92, 106, 0.14);
+  animation: anytalk-recording-breath 1.1s ease-in-out infinite;
+}
+
+@keyframes anytalk-recording-breath {
+  0%, 100% {
+    background-color: rgba(255, 92, 106, 0.14);
+    box-shadow: 0 0 0 0 rgba(255, 92, 106, 0.0);
+  }
+  50% {
+    background-color: rgba(255, 92, 106, 0.26);
+    box-shadow: 0 0 0 1px rgba(255, 92, 106, 0.55);
+  }
+}
+
+@keyframes anytalk-connecting-pulse {
+  0%, 100% { opacity: 1.0; }
+  50%      { opacity: 0.55; }
+}
