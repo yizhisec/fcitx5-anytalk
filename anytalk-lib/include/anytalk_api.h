@@ -12,6 +12,7 @@ typedef enum {
     ANYTALK_EVENT_FINAL   = 1,
     ANYTALK_EVENT_STATUS  = 2,
     ANYTALK_EVENT_ERROR   = 3,
+    ANYTALK_EVENT_LEVEL   = 4,  /* text payload is decimal string in [0,1] e.g. "0.74" */
 } AnytalkEventType;
 
 typedef void (*AnytalkEventCallback)(void *user_data, AnytalkEventType type, const char *text);

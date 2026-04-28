@@ -13,8 +13,8 @@ const c = @cImport({
 });
 
 pub const TlsStream = struct {
-    ssl: *c.SSL,
-    ctx: *c.SSL_CTX,
+    ssl: ?*c.SSL,
+    ctx: ?*c.SSL_CTX,
     fd: c_int,
 
     pub fn connect(host: []const u8, port: u16) !TlsStream {
@@ -83,6 +83,7 @@ pub const TlsStream = struct {
 
     /// Set a read timeout on the underlying socket. 0 means no timeout.
     pub fn setReadTimeout(self: *TlsStream, ms: u32) void {
+        if (self.fd < 0) return;
         const tv = c.struct_timeval{
             .tv_sec = @intCast(ms / 1000),
             .tv_usec = @intCast(@as(u64, ms % 1000) * 1000),
@@ -91,9 +92,10 @@ pub const TlsStream = struct {
     }
 
     pub fn read(self: *TlsStream, buf: []u8) !usize {
-        const n = c.SSL_read(self.ssl, buf.ptr, @intCast(buf.len));
+        const ssl = self.ssl orelse return error.ConnectionClosed;
+        const n = c.SSL_read(ssl, buf.ptr, @intCast(buf.len));
         if (n <= 0) {
-            const err = c.SSL_get_error(self.ssl, n);
+            const err = c.SSL_get_error(ssl, n);
             if (err == c.SSL_ERROR_ZERO_RETURN) return error.ConnectionClosed;
             if (err == c.SSL_ERROR_WANT_READ) return error.WouldBlock;
             if (err == c.SSL_ERROR_SYSCALL) {
@@ -106,18 +108,31 @@ pub const TlsStream = struct {
     }
 
     pub fn write(self: *TlsStream, data: []const u8) !void {
+        const ssl = self.ssl orelse return error.SslWriteFailed;
         var sent: usize = 0;
         while (sent < data.len) {
-            const n = c.SSL_write(self.ssl, data[sent..].ptr, @intCast(data.len - sent));
+            const n = c.SSL_write(ssl, data[sent..].ptr, @intCast(data.len - sent));
             if (n <= 0) return error.SslWriteFailed;
             sent += @as(usize, @intCast(n));
         }
     }
 
+    /// Idempotent — calling close() more than once is safe and a no-op after
+    /// the first call. This prevents double-free crashes inside OpenSSL when
+    /// session reconnect logic accidentally closes the same stream twice.
     pub fn close(self: *TlsStream) void {
-        _ = c.SSL_shutdown(self.ssl);
-        c.SSL_free(self.ssl);
-        c.SSL_CTX_free(self.ctx);
-        _ = c.close(self.fd);
+        if (self.ssl) |ssl| {
+            _ = c.SSL_shutdown(ssl);
+            c.SSL_free(ssl);
+            self.ssl = null;
+        }
+        if (self.ctx) |ctx| {
+            c.SSL_CTX_free(ctx);
+            self.ctx = null;
+        }
+        if (self.fd >= 0) {
+            _ = c.close(self.fd);
+            self.fd = -1;
+        }
     }
 };

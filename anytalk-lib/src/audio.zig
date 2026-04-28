@@ -9,10 +9,33 @@ const c = @cImport({
 /// Audio chunk: 40ms at 16kHz mono S16LE = 640 samples = 1280 bytes
 pub const CHUNK_BYTES: usize = 1280;
 
+/// Compute normalized RMS amplitude (~0..1) from S16LE PCM bytes.
+pub fn rmsLevel(data: []const u8) f32 {
+    if (data.len < 2) return 0.0;
+    const sample_count = data.len / 2;
+    var sum_sq: f64 = 0.0;
+    var i: usize = 0;
+    while (i + 1 < data.len) : (i += 2) {
+        const lo: i16 = @bitCast(@as(u16, data[i]) | (@as(u16, data[i + 1]) << 8));
+        const v: f64 = @as(f64, @floatFromInt(lo)) / 32768.0;
+        sum_sq += v * v;
+    }
+    const rms = std.math.sqrt(sum_sq / @as(f64, @floatFromInt(sample_count)));
+    // Map RMS ~[0, 0.4] to [0, 1] visually (typical voice rarely fills full scale).
+    const scaled = rms / 0.4;
+    return @floatCast(@min(1.0, @max(0.0, scaled)));
+}
+
+pub const LevelCallback = *const fn (level: f32, user_data: ?*anyopaque) void;
+
 pub const AudioTarget = struct {
     mutex: std.Thread.Mutex = .{},
     callback: ?*const fn (data: []const u8, user_data: ?*anyopaque) void = null,
     user_data: ?*anyopaque = null,
+
+    // Always-on level callback (independent of session target).
+    level_callback: ?LevelCallback = null,
+    level_user_data: ?*anyopaque = null,
 
     pub fn setTarget(self: *AudioTarget, cb: *const fn (data: []const u8, user_data: ?*anyopaque) void, ud: ?*anyopaque) void {
         self.mutex.lock();
@@ -28,6 +51,13 @@ pub const AudioTarget = struct {
         self.user_data = null;
     }
 
+    pub fn setLevelCallback(self: *AudioTarget, cb: LevelCallback, ud: ?*anyopaque) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.level_callback = cb;
+        self.level_user_data = ud;
+    }
+
     pub fn isActive(self: *AudioTarget) bool {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -36,9 +66,19 @@ pub const AudioTarget = struct {
 
     pub fn send(self: *AudioTarget, data: []const u8) void {
         self.mutex.lock();
-        defer self.mutex.unlock();
-        if (self.callback) |cb| {
-            cb(data, self.user_data);
+        const cb = self.callback;
+        const ud = self.user_data;
+        const lvl_cb = self.level_callback;
+        const lvl_ud = self.level_user_data;
+        self.mutex.unlock();
+
+        // Always feed the level callback so UI can show idle baseline movement
+        // even when no session is consuming audio.
+        if (lvl_cb) |fn_| {
+            fn_(rmsLevel(data), lvl_ud);
+        }
+        if (cb) |fn_| {
+            fn_(data, ud);
         }
     }
 };

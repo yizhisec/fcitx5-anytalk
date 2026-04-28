@@ -198,15 +198,22 @@ pub const Session = struct {
     }
 
     fn sessionLoop(self: *Session) void {
+        var saw_error = false;
         while (self.running.load(.acquire)) {
             self.runSession() catch |err| {
                 log.err("Session error: {any}", .{err});
-                self.emitEvent(3, "session error");
+                // runSession already emitted the specific server error.
+                // Only emit a generic toast for unexpected/transport errors.
+                if (err != error.AsrServerError) {
+                    self.emitEvent(3, "session error");
+                }
+                saw_error = true;
                 break;
             };
             if (!self.running.load(.acquire)) break;
             if (!self.audio_target.isActive()) break; // User stopped, drain complete
-            // Server ended session - reconnect
+            // Server ended session normally (no error) — reconnect for the
+            // next utterance segment.
             log.info("Server ended session, reconnecting...", .{});
             self.ws.close();
             self.ws = self.pool.take() orelse
@@ -216,7 +223,13 @@ pub const Session = struct {
                 });
         }
         self.ws.close();
-        self.emitEvent(2, "idle");
+        // On error paths the upper layer holds the toast for ~1.8s and emits
+        // idle itself; emitting idle here would tear that toast down
+        // immediately. On normal exit (user stop / pool drained), emit idle
+        // so the state machine closes.
+        if (!saw_error) {
+            self.emitEvent(2, "idle");
+        }
     }
 
     fn runSession(self: *Session) !void {
@@ -293,7 +306,11 @@ pub const Session = struct {
                         const msg = parsed.error_msg orelse "server error";
                         log.err("ASR Error: {s}", .{msg});
                         self.emitEvent(3, msg);
-                        break;
+                        // Surface as a hard error so sessionLoop bails out
+                        // instead of reconnecting in a tight loop. Server-side
+                        // errors (quota exceeded, auth, etc.) are not
+                        // recoverable by reconnecting.
+                        return error.AsrServerError;
                     }
                     if (parsed.kind != .response) continue;
                     if (parsed.json_text) |jt| {

@@ -13,6 +13,10 @@ pub const AnytalkContext = struct {
     audio_target: audio_mod.AudioTarget,
     audio_capture: audio_mod.AudioCapture,
 
+    // Audio level throttling (~20 Hz)
+    level_emit_mutex: std.Thread.Mutex = .{},
+    last_level_emit_ns: i128 = 0,
+
     // Connection pool
     pool: asr_mod.ConnectionPool,
 
@@ -64,6 +68,10 @@ pub const AnytalkContext = struct {
 
         self.audio_capture = audio_mod.AudioCapture.init(&self.audio_target);
 
+        // Wire audio level callback → main user callback (throttled).
+        const opaque_self: *anyopaque = @ptrCast(self);
+        self.audio_target.setLevelCallback(levelCallback, opaque_self);
+
         // Start audio capture
         self.audio_capture.start() catch |err| {
             log.err("Failed to start audio capture: {any}", .{err});
@@ -103,6 +111,38 @@ pub const AnytalkContext = struct {
         self.callback(self.user_data, event_type, text);
     }
 
+    /// Audio capture level callback. Throttles to ~20 Hz and emits ANYTALK_EVENT_LEVEL (4)
+    /// with payload formatted as decimal string in [0,1] e.g. "0.7400".
+    fn levelCallback(level: f32, user_data: ?*anyopaque) void {
+        const self: *AnytalkContext = @ptrCast(@alignCast(user_data orelse return));
+
+        // Throttle ~20 Hz.
+        const now = std.time.nanoTimestamp();
+        self.level_emit_mutex.lock();
+        const last = self.last_level_emit_ns;
+        if (now - last < 50_000_000) {
+            self.level_emit_mutex.unlock();
+            return;
+        }
+        self.last_level_emit_ns = now;
+        self.level_emit_mutex.unlock();
+
+        // Hand-rolled "0.NNNN" formatter — avoids std.fmt entry points whose
+        // ABI shifted in Zig 0.15 (panicked under ReleaseFast in this addon).
+        const clamped = if (level < 0.0) @as(f32, 0.0) else if (level > 1.0) @as(f32, 1.0) else level;
+        const scaled: u32 = @intFromFloat(clamped * 10000.0);
+        var buf: [8]u8 = undefined;
+        buf[0] = '0' + @as(u8, @intCast(scaled / 10000));
+        buf[1] = '.';
+        buf[2] = '0' + @as(u8, @intCast((scaled / 1000) % 10));
+        buf[3] = '0' + @as(u8, @intCast((scaled / 100) % 10));
+        buf[4] = '0' + @as(u8, @intCast((scaled / 10) % 10));
+        buf[5] = '0' + @as(u8, @intCast(scaled % 10));
+        buf[6] = 0;
+        buf[7] = 0;
+        self.callback(self.user_data, 4, @ptrCast(&buf[0]));
+    }
+
     /// Abort the draining session if one exists. Caller must hold session_mutex.
     /// Temporarily releases and re-acquires the mutex to join the drain thread
     /// (drainWait also acquires session_mutex, so holding it here would deadlock).
@@ -135,7 +175,15 @@ pub const AnytalkContext = struct {
         // Retry audio capture startup in case PulseAudio/pipewire was not ready at init.
         self.audio_capture.start() catch |err| {
             log.err("Failed to start audio capture: {any}", .{err});
-            // Continue anyway so UI won't block; session may run without audio.
+            // ERROR drives the toast; the upper layer translates that into a
+            // transient visual state and an idle return. We deliberately do
+            // NOT emit STATUS="idle" here — the addon/overlay handles the
+            // 1.8s read-window for the toast and emits its own idle when the
+            // window expires. Emitting idle here would tear down the toast
+            // immediately.
+            self.callback(self.user_data, 3,
+                "麦克风不可用，请检查 PulseAudio/PipeWire 或音频设备");
+            return err;
         };
 
         // Abort active session

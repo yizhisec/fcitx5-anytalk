@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=org.fcitx.Fcitx5.AnyTalk.Overlay
+Exec=/usr/bin/anytalk-overlay
