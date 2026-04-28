@@ -36,7 +36,7 @@ int main(int argc, char **argv) {
 
     QApplication app(argc, argv);
     app.setApplicationName("anytalk-overlay");
-    app.setApplicationVersion("0.3.0");
+    app.setApplicationVersion("0.4.0");
     app.setQuitOnLastWindowClosed(false);
 
     QCommandLineParser parser;
