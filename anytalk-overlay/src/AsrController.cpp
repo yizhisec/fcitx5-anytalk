@@ -84,6 +84,15 @@ void AsrController::stopRecording() {
     // onBackendFinished, which fires after the WebSocket cleanly closes.
 }
 
+void AsrController::toggleRecording() {
+    if (currentState_ == state::Recording ||
+        currentState_ == state::Connecting) {
+        stopRecording();
+    } else {
+        startRecording();
+    }
+}
+
 void AsrController::cancelRecording() {
     if (audio_) audio_->stop();
     if (backend_) backend_->cancel();

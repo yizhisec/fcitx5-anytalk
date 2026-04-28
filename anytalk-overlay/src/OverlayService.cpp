@@ -44,6 +44,10 @@ void OverlayService::Hide() {
 
 void OverlayService::Ping() {}
 
+void OverlayService::ToggleRecording() {
+    if (asr_) asr_->toggleRecording();
+}
+
 void OverlayService::StartRecording() {
     if (asr_) asr_->startRecording();
 }

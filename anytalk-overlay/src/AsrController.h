@@ -30,6 +30,9 @@ public slots:
     void startRecording();
     void stopRecording();
     void cancelRecording();
+    /// Idempotent toggle for the dumb-forward fcitx5 addon: starts a new
+    /// session if idle/error, otherwise stops the active one.
+    void toggleRecording();
 
 signals:
     /// Mirrors backend events for the UI / D-Bus surface.

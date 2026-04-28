@@ -11,9 +11,10 @@ class AsrController;
 ///   Interface: org.fcitx.Fcitx5.AnyTalk.Overlay
 ///
 /// Methods (called by the fcitx5 addon over D-Bus):
-///   StartRecording()
-///   StopRecording()
-///   CancelRecording()
+///   ToggleRecording()      idempotent: starts if idle, stops if active
+///   CancelRecording()      drops the in-flight session, no commit
+///   StartRecording()       explicit start (kept for non-toggle clients)
+///   StopRecording()        explicit stop (kept for non-toggle clients)
 ///   Show()/Hide()/Ping()  — leftover from Phase 2; kept for diagnostics
 ///
 /// Signals (broadcast to the addon and any other observer):
@@ -34,6 +35,7 @@ public slots:
     Q_SCRIPTABLE void Show();
     Q_SCRIPTABLE void Hide();
     Q_SCRIPTABLE void Ping();
+    Q_SCRIPTABLE void ToggleRecording();
     Q_SCRIPTABLE void StartRecording();
     Q_SCRIPTABLE void StopRecording();
     Q_SCRIPTABLE void CancelRecording();

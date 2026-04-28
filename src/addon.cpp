@@ -6,10 +6,6 @@
 
 #include <fcitx/addonfactory.h>
 #include <fcitx/addonmanager.h>
-#include <fcitx/inputpanel.h>
-#include <fcitx/text.h>
-#include <fcitx/statusarea.h>
-#include <fcitx/userinterface.h>
 #include <fcitx-utils/log.h>
 #include <fcitx-utils/keysymgen.h>
 #include <fcitx-utils/dbus/bus.h>
@@ -23,66 +19,12 @@ constexpr const char *kOverlayPath = "/overlay";
 constexpr const char *kOverlayInterface = "org.fcitx.Fcitx5.AnyTalk.Overlay";
 } // namespace
 
-// ---------------- AnyTalkDBus ----------------
-
-AnyTalkDBus::AnyTalkDBus(AnyTalkEngine *engine) : engine_(engine) {}
-
-void AnyTalkDBus::emitStateChanged(const std::string &state) {
-    stateChanged(state);
-}
-
-std::string AnyTalkDBus::getState() { return engine_->getState(); }
-
-// ---------------- AnyTalkStatusAction ----------------
-
-AnyTalkStatusAction::AnyTalkStatusAction(AnyTalkEngine *engine) : engine_(engine) {}
-
-std::string AnyTalkStatusAction::shortText(fcitx::InputContext *) const {
-    return engine_->getStatusLabel();
-}
-
-std::string AnyTalkStatusAction::icon(fcitx::InputContext *) const {
-    return engine_->getStatusIcon();
-}
-
-// ---------------- AnyTalkEngine ----------------
-
-std::string AnyTalkEngine::getStatusLabel() const {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    if (current_state_ == Constants::STATE_RECORDING) return Constants::LABEL_RECORDING;
-    if (current_state_ == Constants::STATE_CONNECTING) return Constants::LABEL_CONNECTING;
-    if (current_state_ == Constants::STATE_CONNECTED) return Constants::LABEL_READY;
-    return Constants::LABEL_DEFAULT;
-}
-
-std::string AnyTalkEngine::getStatusIcon() const {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    if (current_state_ == Constants::STATE_RECORDING) return Constants::ICON_RECORDING;
-    if (current_state_ == Constants::STATE_CONNECTING) return Constants::ICON_CONNECTING;
-    if (current_state_ == Constants::STATE_CONNECTED) return Constants::ICON_READY;
-    return Constants::ICON_IDLE;
-}
-
-std::string AnyTalkEngine::getState() const {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    return current_state_;
-}
-
 AnyTalkEngine::AnyTalkEngine(fcitx::Instance *instance) : instance_(instance) {
     dispatcher_.attach(&instance_->eventLoop());
 
-    statusAction_ = std::make_unique<AnyTalkStatusAction>(this);
-
-    // D-Bus setup: register our service for legacy observers, push session
-    // env into dbus daemon (so the overlay activated process gets WAYLAND_DISPLAY),
-    // and subscribe to the overlay's signal stream.
     auto *dbusAddon = dbus();
     if (dbusAddon) {
-        auto *bus = dbusAddon->call<fcitx::IDBusModule::bus>();
-        if (bus) {
-            dbusObject_ = std::make_unique<AnyTalkDBus>(this);
-            bus->addObjectVTable(Constants::DBUS_PATH, Constants::DBUS_INTERFACE, *dbusObject_);
-            bus->requestName(Constants::DBUS_SERVICE, fcitx::dbus::RequestNameFlag{});
+        if (auto *bus = dbusAddon->call<fcitx::IDBusModule::bus>()) {
             pushDBusEnv(bus);
             connectOverlaySignals(bus);
         }
@@ -100,62 +42,24 @@ void AnyTalkEngine::handleGlobalKeyEvent(fcitx::Event &event) {
     auto &keyEvent = static_cast<fcitx::KeyEvent &>(event);
     if (keyEvent.isRelease()) return;
 
-    std::string state;
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        state = current_state_;
-    }
-    const bool is_recording = (state == Constants::STATE_RECORDING);
-    const bool is_connecting = (state == Constants::STATE_CONNECTING);
-    const bool is_active = is_recording || is_connecting;
-    const bool is_error = (state == Constants::STATE_ERROR);
-
-    // Enter while recording → commit (overlay does Stop, the eventual final
-    // segment will be committed when TranscriptFinal arrives).
-    if (keyEvent.key().sym() == FcitxKey_Return && is_recording) {
-        overlayCall("StopRecording");
+    // Dumb forward — the overlay is the state owner and decides whether each
+    // method is a no-op (idle) or an action (active session). We only swallow
+    // F2/AudioPlay, since those keys are unambiguously ours; Enter and Esc
+    // are forwarded but also passed through to the focused application so
+    // the user's natural "press Enter to commit and send" / "press Esc to
+    // cancel and close dialog" expectations both work.
+    const auto sym = keyEvent.key().sym();
+    if (sym == FcitxKey_F2 || sym == FcitxKey_AudioPlay) {
+        overlayCall("ToggleRecording");
         keyEvent.accept();
         return;
     }
-
-    // Escape during an active session = cancel (works in both Connecting and
-    // Recording); during the error toast = dismiss. We can't rely on the
-    // overlay window receiving focus on Wayland (layer-shell with OnDemand
-    // keyboard interactivity), so the addon's global watcher handles it.
-    if (keyEvent.key().sym() == FcitxKey_Escape) {
-        if (is_active) {
-            overlayCall("CancelRecording");
-            applyState(Constants::STATE_IDLE);
-            keyEvent.accept();
-            return;
-        }
-        if (is_error) {
-            overlayCall("Hide");
-            applyState(Constants::STATE_IDLE);
-            keyEvent.accept();
-            return;
-        }
-        // Not our state → let other handlers see Esc.
+    if (sym == FcitxKey_Return) {
+        overlayCall("StopRecording");
+        return;
     }
-
-    // F2 / Media Play → toggle, with a special case for the error toast:
-    // pressing F2 while an error is showing dismisses the overlay rather than
-    // immediately retrying — matches the "再次 F2 应该关闭" expectation.
-    if (keyEvent.key().sym() == FcitxKey_F2 || keyEvent.key().sym() == FcitxKey_AudioPlay) {
-        if (is_recording) {
-            overlayCall("StopRecording");
-        } else if (is_connecting) {
-            // Cancel rather than stop: nothing has been recognized yet, so
-            // there's no transcript to commit and the user just wants out.
-            overlayCall("CancelRecording");
-            applyState(Constants::STATE_IDLE);
-        } else if (is_error) {
-            overlayCall("Hide");
-            applyState(Constants::STATE_IDLE);
-        } else {
-            overlayCall("StartRecording");
-        }
-        keyEvent.accept();
+    if (sym == FcitxKey_Escape) {
+        overlayCall("CancelRecording");
         return;
     }
 }
@@ -198,65 +102,20 @@ void AnyTalkEngine::pushDBusEnv(fcitx::dbus::Bus *bus) {
 }
 
 void AnyTalkEngine::connectOverlaySignals(fcitx::dbus::Bus *bus) {
-    auto subscribe = [&](const char *signalName, auto handler) {
-        fcitx::dbus::MatchRule rule(
-            /*service=*/kOverlayService,
-            /*path=*/kOverlayPath,
-            /*interface=*/kOverlayInterface,
-            /*name=*/signalName);
-        auto slot = bus->addMatch(
-            rule,
-            [handler](fcitx::dbus::Message &msg) {
-                std::string s;
-                msg >> s;
-                handler(s);
-                return true;
-            });
-        if (slot) signalSlots_.push_back(std::move(slot));
-    };
-
-    subscribe("StateChanged",
-              [this](const std::string &s) { onOverlayStateChanged(s); });
-    subscribe("CommitText",
-              [this](const std::string &s) { onOverlayCommitText(s); });
-    subscribe("ErrorOccurred",
-              [this](const std::string &s) { onOverlayErrorOccurred(s); });
-    // Note: TranscriptPartial / TranscriptFinal are not subscribed by the
-    // addon any more — the overlay shows transcript itself, and only the
-    // single CommitText signal at session end drives ic->commitString().
-}
-
-void AnyTalkEngine::onOverlayStateChanged(const std::string &state) {
-    dispatcher_.schedule([this, state]() { applyState(state); });
-}
-
-void AnyTalkEngine::onOverlayCommitText(const std::string &text) {
-    dispatcher_.schedule([this, text]() { commitText(text); });
-}
-
-void AnyTalkEngine::onOverlayErrorOccurred(const std::string &text) {
-    FCITX_ERROR() << "Overlay error: " << text;
-    // State transitions are driven by overlay's StateChanged stream; the toast
-    // is purely visual. We only log here.
-}
-
-void AnyTalkEngine::applyState(const std::string &state) {
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        current_state_ = state;
-    }
-    if (dbusObject_) dbusObject_->emitStateChanged(state);
-
-    auto *ic = instance_->inputContextManager().lastFocusedInputContext();
-    if (!ic) return;
-
-    if (state == Constants::STATE_IDLE) {
-        ic->statusArea().removeAction(statusAction_.get());
-    } else {
-        ic->statusArea().addAction(fcitx::StatusGroup::InputMethod, statusAction_.get());
-    }
-    statusAction_->update(ic);
-    ic->updateUserInterface(fcitx::UserInterfaceComponent::StatusArea);
+    // Only signal we care about: CommitText. The transcript ends up in the
+    // focused IC via the one operation only fcitx5 can do — ic->commitString.
+    fcitx::dbus::MatchRule rule(
+        /*service=*/kOverlayService,
+        /*path=*/kOverlayPath,
+        /*interface=*/kOverlayInterface,
+        /*name=*/"CommitText");
+    auto slot = bus->addMatch(rule, [this](fcitx::dbus::Message &msg) {
+        std::string text;
+        msg >> text;
+        dispatcher_.schedule([this, text]() { commitText(text); });
+        return true;
+    });
+    if (slot) signalSlots_.push_back(std::move(slot));
 }
 
 void AnyTalkEngine::commitText(const std::string &text) {
