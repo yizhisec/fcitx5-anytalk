@@ -4,7 +4,7 @@ pkgver=__PKGVER__
 pkgrel=1
 pkgdesc="Voice input addon for fcitx5 with a Qt6 Aurora overlay"
 arch=('x86_64')
-url="https://github.com/loyalpartner/fcitx5-anytalk"
+url="https://github.com/yizhisec/fcitx5-anytalk"
 license=('MIT')
 depends=(
   'fcitx5'
