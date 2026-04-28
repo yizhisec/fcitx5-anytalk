@@ -1,6 +1,7 @@
 #include "AsrController.h"
 #include "Config.h"
 #include "OverlayService.h"
+#include "OverlayState.h"
 #include "OverlayWindow.h"
 #include "SettingsDialog.h"
 
@@ -68,6 +69,11 @@ int main(int argc, char **argv) {
                       "instance may already own the name.";
         return 1;
     }
+
+    // Announce liveness so any subscriber holding stale state from a
+    // previously-killed overlay (notably the fcitx5 addon's cached
+    // current_state_) resets immediately.
+    emit service.StateChanged(state::Idle);
 
     // Drive local UI from ASR events.
     QObject::connect(&asr, &AsrController::stateChanged,
