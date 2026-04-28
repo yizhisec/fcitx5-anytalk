@@ -7,10 +7,34 @@
 
 AudioCapture::AudioCapture(QObject *parent) : QObject(parent) {}
 
-AudioCapture::~AudioCapture() { stop(); }
+AudioCapture::~AudioCapture() {
+    running_.store(false, std::memory_order_release);
+    active_.store(false, std::memory_order_release);
+    if (thread_) {
+        thread_->wait();
+        thread_->deleteLater();
+        thread_ = nullptr;
+    }
+    if (pa_) {
+        pa_simple_free(static_cast<pa_simple *>(pa_));
+        pa_ = nullptr;
+    }
+}
 
-bool AudioCapture::start() {
-    if (running_.load(std::memory_order_acquire)) return true;
+bool AudioCapture::prewarm() {
+    if (pa_ && running_.load(std::memory_order_acquire)) return true;
+
+    // Clean up after a dead thread (read failed in captureLoop).
+    if (thread_) {
+        thread_->wait();
+        thread_->deleteLater();
+        thread_ = nullptr;
+    }
+    if (pa_) {
+        pa_simple_free(static_cast<pa_simple *>(pa_));
+        pa_ = nullptr;
+    }
+    warmedUp_.store(false, std::memory_order_release);
 
     pa_sample_spec spec{};
     spec.format = PA_SAMPLE_S16LE;
@@ -35,28 +59,27 @@ bool AudioCapture::start() {
 
     pa_ = pa;
     running_.store(true, std::memory_order_release);
-
     thread_ = QThread::create([this] { captureLoop(); });
     thread_->setObjectName(QStringLiteral("anytalk-capture"));
     thread_->start();
     return true;
 }
 
+bool AudioCapture::start() {
+    // Rebuild if the previous stream died in captureLoop.
+    if (!pa_ || !running_.load(std::memory_order_acquire)) {
+        if (!prewarm()) return false;
+    }
+    active_.store(true, std::memory_order_release);
+    return true;
+}
+
 void AudioCapture::stop() {
-    // Note: guarding stop() with `if (!running_.exchange(false)) return;`
-    // is wrong because the capture loop itself can flip running_ to false
-    // on a read error. Always tear resources down — both checks are
-    // null-guarded so calling stop() twice is harmless.
-    running_.store(false, std::memory_order_release);
-    if (thread_) {
-        thread_->wait();
-        thread_->deleteLater();
-        thread_ = nullptr;
-    }
-    if (pa_) {
-        pa_simple_free(static_cast<pa_simple *>(pa_));
-        pa_ = nullptr;
-    }
+    // Keep the PA stream open and the thread reading (discarding output) so
+    // the source doesn't suspend — that suspend ramp-up costs ~1s of zero
+    // padding on the next start() and is the single biggest hit to
+    // first-press responsiveness when switching applications.
+    active_.store(false, std::memory_order_release);
 }
 
 void AudioCapture::captureLoop() {
@@ -66,13 +89,26 @@ void AudioCapture::captureLoop() {
     while (running_.load(std::memory_order_acquire)) {
         int err = 0;
         if (pa_simple_read(pa, buf.data(), buf.size(), &err) < 0) {
+            // PulseAudio occasionally recycles long-lived streams; surfacing
+            // an error mid-recording would be confusing, so only emit when
+            // a session is actually live. Either way the next start() will
+            // detect the dead thread and rebuild.
             qWarning() << "AudioCapture: pa_simple_read failed:" << pa_strerror(err);
-            emit error(QStringLiteral("音频读取失败"));
+            if (active_.load(std::memory_order_acquire)) {
+                emit error(QStringLiteral("音频读取失败"));
+            }
             running_.store(false, std::memory_order_release);
             break;
         }
-        emit pcm(buf);
-        emit level(computeRms(buf));
+        const double rms = computeRms(buf);
+        if (!warmedUp_.load(std::memory_order_acquire) && rms > 1e-4) {
+            warmedUp_.store(true, std::memory_order_release);
+            emit warmedUp();
+        }
+        if (active_.load(std::memory_order_acquire)) {
+            emit pcm(buf);
+            emit level(rms);
+        }
     }
 }
 

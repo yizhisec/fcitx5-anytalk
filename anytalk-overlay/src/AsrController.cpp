@@ -28,7 +28,13 @@ bool AsrController::applyConfig(const OverlayConfig &cfg) {
         connect(audio_.get(), &AudioCapture::pcm, this, &AsrController::onAudioPcm);
         connect(audio_.get(), &AudioCapture::level, this, &AsrController::onAudioLevel);
         connect(audio_.get(), &AudioCapture::error, this, &AsrController::onAudioError);
+        connect(audio_.get(), &AudioCapture::warmedUp, this,
+                &AsrController::onAudioWarmedUp);
     }
+
+    // Pre-warm the mic stream so the first F2 doesn't pay for stream creation
+    // and PulseAudio's source-suspend silence padding.
+    audio_->prewarm();
     return true;
 }
 
@@ -55,6 +61,10 @@ void AsrController::startRecording() {
         return;
     }
     finalBuffer_.clear();
+    wsConnected_ = false;
+    // mic warm-up is sticky across sessions: once the PA stream has produced
+    // real audio, every subsequent F2 hits a hot mic.
+    audioWarmedUp_ = audio_ && audio_->isWarmedUp();
     if (!audio_->start()) {
         // AudioCapture already emitted error → onAudioError handled the rest.
         return;
@@ -122,10 +132,20 @@ void AsrController::onAudioError(const QString &msg) {
 // ---- Backend events ----
 
 void AsrController::onBackendConnected() {
-    if (currentState_ == state::Connecting) {
-        currentState_ = state::Recording;
-        emit stateChanged(currentState_);
-    }
+    wsConnected_ = true;
+    maybeEnterRecording();
+}
+
+void AsrController::onAudioWarmedUp() {
+    audioWarmedUp_ = true;
+    maybeEnterRecording();
+}
+
+void AsrController::maybeEnterRecording() {
+    if (currentState_ != state::Connecting) return;
+    if (!wsConnected_ || !audioWarmedUp_) return;
+    currentState_ = state::Recording;
+    emit stateChanged(currentState_);
 }
 
 void AsrController::onBackendPartial(const QString &text) {

@@ -46,6 +46,7 @@ private:
     void onAudioPcm(const QByteArray &chunk);
     void onAudioLevel(double level);
     void onAudioError(const QString &msg);
+    void onAudioWarmedUp();
 
     void onBackendPartial(const QString &text);
     void onBackendFinal(const QString &text);
@@ -53,6 +54,7 @@ private:
     void onBackendFinished();
     void onBackendError(const QString &msg);
 
+    void maybeEnterRecording();
     void enterIdle(bool fromError);
 
     std::unique_ptr<AudioCapture> audio_;
@@ -62,4 +64,9 @@ private:
     QString currentState_ = QStringLiteral("idle");
     QString finalBuffer_;
     qint64 lastLevelEmitMs_ = 0;
+    // Recording = ws connected AND mic produced real audio. Both flags are
+    // set by their respective callbacks; the transition happens in
+    // maybeEnterRecording() once both are true.
+    bool wsConnected_ = false;
+    bool audioWarmedUp_ = false;
 };
