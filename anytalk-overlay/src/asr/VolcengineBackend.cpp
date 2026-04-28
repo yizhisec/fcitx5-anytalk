@@ -39,14 +39,26 @@ void VolcengineBackend::openWebSocket() {
 void VolcengineBackend::start() {
     if (state_ != State::Idle) return;
     parseState_ = {};
+    pendingAudio_.clear();
+    nextSeq_ = 1;
     state_ = State::Connecting;
     openWebSocket();
 }
 
 void VolcengineBackend::pushPcm(const QByteArray &chunk) {
+    if (state_ == State::Connecting) {
+        // Buffer for onWsConnected() to flush. Cap so a stuck handshake
+        // (network down) can't grow the buffer unbounded.
+        constexpr int kMaxPendingBytes = 16000 * 2 * 10;  // 10s @ 16kHz S16LE
+        if (pendingAudio_.size() < kMaxPendingBytes) {
+            pendingAudio_.append(chunk);
+        }
+        return;
+    }
     if (state_ != State::Recording) return;
     if (!ws_ || ws_->state() != QAbstractSocket::ConnectedState) return;
-    ws_->sendBinaryMessage(volcengine::buildAudioOnlyRequest(chunk, /*last=*/false));
+    ws_->sendBinaryMessage(volcengine::buildAudioOnlyRequest(
+        chunk, /*last=*/false, nextSeq_++));
 }
 
 void VolcengineBackend::stop() {
@@ -54,7 +66,8 @@ void VolcengineBackend::stop() {
     state_ = State::Stopping;
     if (ws_ && ws_->state() == QAbstractSocket::ConnectedState) {
         // Send a final audio frame with the LAST flag so the server knows to drain.
-        ws_->sendBinaryMessage(volcengine::buildAudioOnlyRequest(QByteArray(), /*last=*/true));
+        ws_->sendBinaryMessage(volcengine::buildAudioOnlyRequest(
+            QByteArray(), /*last=*/true, nextSeq_++));
     }
     // Server will deliver one or more responses + close; teardown happens in
     // onWsDisconnected / on a final response frame (flags & 0x3 == 0x3).
@@ -70,7 +83,19 @@ void VolcengineBackend::onWsConnected() {
     emit connected();
     state_ = State::Recording;
     const auto initial = volcengine::buildInitialRequestJson(settings_.mode);
-    ws_->sendBinaryMessage(volcengine::buildFullClientRequest(initial));
+    ws_->sendBinaryMessage(volcengine::buildFullClientRequest(initial, nextSeq_++));
+    // Flush handshake-buffered audio in 200ms slices — Doubao silently
+    // drops audio_only frames much larger than that.
+    if (!pendingAudio_.isEmpty()) {
+        constexpr int kFlushSliceBytes = 16000 * 2 * 200 / 1000;  // 200ms @ 16kHz S16LE
+        for (int off = 0; off < pendingAudio_.size(); off += kFlushSliceBytes) {
+            const int len = std::min<int>(kFlushSliceBytes,
+                                          pendingAudio_.size() - off);
+            ws_->sendBinaryMessage(volcengine::buildAudioOnlyRequest(
+                pendingAudio_.mid(off, len), /*last=*/false, nextSeq_++));
+        }
+        pendingAudio_.clear();
+    }
 }
 
 void VolcengineBackend::onWsBinary(const QByteArray &data) {
@@ -120,6 +145,7 @@ void VolcengineBackend::teardown(const QString &errorMessage) {
     const bool wasError = !errorMessage.isEmpty();
     state_ = State::Idle;
     parseState_ = {};
+    pendingAudio_.clear();
     if (wasError) emit error(errorMessage);
     else emit finished();
 }

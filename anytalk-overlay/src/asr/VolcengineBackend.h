@@ -51,4 +51,12 @@ private:
     State state_ = State::Idle;
 
     volcengine::AsrParseState parseState_;
+
+    // Audio captured during ws handshake; flushed in onWsConnected() so the
+    // user's leading words aren't dropped.
+    QByteArray pendingAudio_;
+
+    // Per-connection sequence: full client request gets 1, audio frames 2..N.
+    // The protocol rejects mixed seq/no-seq frames within one connection.
+    qint32 nextSeq_ = 1;
 };

@@ -6,8 +6,11 @@
 
 namespace volcengine {
 
-QByteArray buildFullClientRequest(const QByteArray &json);
-QByteArray buildAudioOnlyRequest(const QByteArray &pcm, bool last);
+// All frames within one connection must carry a strictly increasing positive
+// `seq` (mixing seq / no-seq frames triggers "autoAssignedSequence" server
+// errors). Caller convention: seq=1 for the first request, 2..N for audio.
+QByteArray buildFullClientRequest(const QByteArray &json, qint32 seq);
+QByteArray buildAudioOnlyRequest(const QByteArray &pcm, bool last, qint32 seq);
 
 struct ParsedFrame {
     enum class Kind { Unknown, Response, Error };

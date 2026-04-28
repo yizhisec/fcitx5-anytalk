@@ -15,8 +15,8 @@ constexpr quint8 kMsgFullClientReq = 0b0001;
 constexpr quint8 kMsgAudioOnly     = 0b0010;
 constexpr quint8 kMsgFullServerRsp = 0b1001;
 constexpr quint8 kMsgErrorResp     = 0b1111;
-constexpr quint8 kFlagNoSeq        = 0b0000;
-constexpr quint8 kFlagLastNoSeq    = 0b0010;
+constexpr quint8 kFlagPosSeq       = 0b0001;  // intermediate frame
+constexpr quint8 kFlagNegWithSeq   = 0b0011;  // last frame, seq negated
 constexpr quint8 kSerJson          = 0b0001;
 constexpr quint8 kSerNone          = 0b0000;
 constexpr quint8 kCompressionNone  = 0b0000;
@@ -38,29 +38,34 @@ QByteArray u32be(quint32 n) {
 }
 } // namespace
 
-QByteArray buildFullClientRequest(const QByteArray &json) {
+QByteArray buildFullClientRequest(const QByteArray &json, qint32 seq) {
+    // Wire layout: 4B header + 4B sequence (BE int32) + 4B payload size + JSON.
+    // Tagging this frame with a sequence is required as soon as any subsequent
+    // frame in the same connection uses POS_SEQUENCE — otherwise the server
+    // tries to auto-assign one and fails with "decode V1 protocol message
+    // autoAssignedSequence".
     QByteArray out;
-    out.reserve(8 + json.size());
-    out.append(buildHeader(kMsgFullClientReq, kFlagNoSeq, kSerJson, kCompressionNone));
+    out.reserve(12 + json.size());
+    out.append(buildHeader(kMsgFullClientReq, kFlagPosSeq, kSerJson, kCompressionNone));
+    out.append(u32be(static_cast<quint32>(seq)));
     out.append(u32be(static_cast<quint32>(json.size())));
     out.append(json);
     return out;
 }
 
-QByteArray buildAudioOnlyRequest(const QByteArray &pcm, bool last) {
-    // Inlined header + length build to keep the per-chunk path (~25 Hz)
-    // free of the small temporary QByteArrays buildHeader / u32be would
-    // otherwise allocate.
-    const quint8 flags = last ? kFlagLastNoSeq : kFlagNoSeq;
-    const quint32 lenBe = qToBigEndian(static_cast<quint32>(pcm.size()));
+QByteArray buildAudioOnlyRequest(const QByteArray &pcm, bool last, qint32 seq) {
+    // Wire layout: 4B header + 4B sequence (BE int32, negated on last frame)
+    // + 4B payload size + raw PCM. NEG_WITH_SEQUENCE on last so the server
+    // sees a clear end-of-stream; POS_SEQUENCE on intermediate frames so
+    // burst-flushed audio doesn't get reordered/dropped.
+    const quint8 flags = last ? kFlagNegWithSeq : kFlagPosSeq;
+    const qint32 wireSeq = last ? -seq : seq;
 
     QByteArray out;
-    out.reserve(8 + pcm.size());
-    out.append(static_cast<char>(((kVersion & 0xF) << 4) | (kHeaderSize4B & 0xF)));
-    out.append(static_cast<char>(((kMsgAudioOnly & 0xF) << 4) | (flags & 0xF)));
-    out.append(static_cast<char>(((kSerNone & 0xF) << 4) | (kCompressionNone & 0xF)));
-    out.append('\0');
-    out.append(reinterpret_cast<const char *>(&lenBe), 4);
+    out.reserve(12 + pcm.size());
+    out.append(buildHeader(kMsgAudioOnly, flags, kSerNone, kCompressionNone));
+    out.append(u32be(static_cast<quint32>(wireSeq)));
+    out.append(u32be(static_cast<quint32>(pcm.size())));
     out.append(pcm);
     return out;
 }
