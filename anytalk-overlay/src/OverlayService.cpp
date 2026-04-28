@@ -55,3 +55,5 @@ void OverlayService::StopRecording() {
 void OverlayService::CancelRecording() {
     if (asr_) asr_->cancelRecording();
 }
+
+void OverlayService::OpenSettings() { emit openSettingsRequested(); }

@@ -73,8 +73,6 @@ AnyTalkEngine::AnyTalkEngine(fcitx::Instance *instance) : instance_(instance) {
 
     statusAction_ = std::make_unique<AnyTalkStatusAction>(this);
 
-    reloadConfig();
-
     // D-Bus setup: register our service for legacy observers, push session
     // env into dbus daemon (so the overlay activated process gets WAYLAND_DISPLAY),
     // and subscribe to the overlay's signal stream.
@@ -97,17 +95,6 @@ AnyTalkEngine::AnyTalkEngine(fcitx::Instance *instance) : instance_(instance) {
 }
 
 AnyTalkEngine::~AnyTalkEngine() = default;
-
-void AnyTalkEngine::setConfig(const fcitx::RawConfig &config) {
-    config_.load(config, true);
-    fcitx::safeSaveAsIni(config_, "conf/anytalk.conf");
-    // Note: overlay re-reads this file only at process start. Restarting the
-    // overlay (`pkill -x anytalk-overlay`) picks up the new credentials.
-}
-
-void AnyTalkEngine::reloadConfig() {
-    fcitx::readAsIni(config_, "conf/anytalk.conf");
-}
 
 void AnyTalkEngine::handleGlobalKeyEvent(fcitx::Event &event) {
     auto &keyEvent = static_cast<fcitx::KeyEvent &>(event);

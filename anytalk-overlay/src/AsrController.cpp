@@ -1,122 +1,35 @@
 #include "AsrController.h"
+#include "Config.h"
+#include "OverlayState.h"
+#include "asr/AsrBackend.h"
+#include "asr/AsrBackendFactory.h"
+#include "audio/AudioCapture.h"
 
+#include <QDateTime>
 #include <QDebug>
-#include <QMetaObject>
-#include <QTimer>
-#include <QtConcurrent>
-#include <QThread>
-#include <QtGlobal>
 
 AsrController::AsrController(QObject *parent) : QObject(parent) {}
+AsrController::~AsrController() = default;
 
-AsrController::~AsrController() {
-    if (ctx_) {
-        anytalk_destroy(ctx_);
-        ctx_ = nullptr;
-    }
-}
-
-bool AsrController::initialise(const OverlayConfig &cfg) {
-    if (cfg.appId.isEmpty() || cfg.accessToken.isEmpty()) {
-        qWarning() << "AsrController: missing AppID/AccessToken in"
-                      " ~/.config/fcitx5/conf/anytalk.conf";
-        return false;
-    }
+bool AsrController::applyConfig(const OverlayConfig &cfg) {
     removeTrailingPunctuation_ = cfg.removeTrailingPunctuation;
 
-    const QByteArray appId = cfg.appId.toUtf8();
-    const QByteArray accessToken = cfg.accessToken.toUtf8();
-    AnytalkConfig zig_config{};
-    zig_config.app_id = appId.constData();
-    zig_config.access_token = accessToken.constData();
-    zig_config.resource_id = nullptr;
-    zig_config.mode = nullptr;
+    backend_ = asr::create(cfg, this);
+    if (!backend_) return false;
 
-    ctx_ = anytalk_init(&zig_config, &AsrController::zigCallback, this);
-    if (!ctx_) {
-        qWarning() << "AsrController: anytalk_init failed";
-        return false;
+    connect(backend_.get(), &AsrBackend::partial, this, &AsrController::onBackendPartial);
+    connect(backend_.get(), &AsrBackend::final_, this, &AsrController::onBackendFinal);
+    connect(backend_.get(), &AsrBackend::error, this, &AsrController::onBackendError);
+    connect(backend_.get(), &AsrBackend::connected, this, &AsrController::onBackendConnected);
+    connect(backend_.get(), &AsrBackend::finished, this, &AsrController::onBackendFinished);
+
+    if (!audio_) {
+        audio_ = std::make_unique<AudioCapture>(this);
+        connect(audio_.get(), &AudioCapture::pcm, this, &AsrController::onAudioPcm);
+        connect(audio_.get(), &AudioCapture::level, this, &AsrController::onAudioLevel);
+        connect(audio_.get(), &AudioCapture::error, this, &AsrController::onAudioError);
     }
     return true;
-}
-
-void AsrController::zigCallback(void *user_data, AnytalkEventType type, const char *text) {
-    auto *self = static_cast<AsrController *>(user_data);
-    if (!self) return;
-    const QString s = QString::fromUtf8(text ? text : "");
-
-    // Hop to the main thread so signals are emitted on a Qt-managed thread.
-    QMetaObject::invokeMethod(self, [self, type, s]() {
-        switch (type) {
-        case ANYTALK_EVENT_PARTIAL:
-            emit self->transcriptPartial(s);
-            break;
-        case ANYTALK_EVENT_FINAL: {
-            const QString processed = self->postProcess(s);
-            self->finalBuffer_ += processed;
-            emit self->transcriptFinal(processed);
-            break;
-        }
-        case ANYTALK_EVENT_STATUS:
-            emit self->stateChanged(s);
-            if (s == QStringLiteral("recording")) {
-                // New session — start fresh.
-                self->finalBuffer_.clear();
-            } else if (s == QStringLiteral("idle")) {
-                // Session ended naturally. Deliver the accumulated text in one
-                // shot. Post-processing hooks (LLM polish etc.) plug in here in
-                // the future, between accumulation and the commitText signal.
-                if (!self->finalBuffer_.isEmpty()) {
-                    emit self->commitText(self->finalBuffer_);
-                    self->finalBuffer_.clear();
-                }
-            }
-            break;
-        case ANYTALK_EVENT_ERROR:
-            // Drop any partial accumulation — we don't commit half-recognized
-            // text on error. The overlay stays in Error state until the user
-            // dismisses it (Esc / F2). The addon's F2 handler calls Hide()
-            // and resets its own state machine.
-            self->finalBuffer_.clear();
-            emit self->stateChanged(QStringLiteral("error"));
-            emit self->errorOccurred(s);
-            break;
-        case ANYTALK_EVENT_LEVEL: {
-            bool ok = false;
-            const double v = s.toDouble(&ok);
-            if (ok) emit self->audioLevel(v);
-            break;
-        }
-        }
-    });
-}
-
-void AsrController::startRecording() {
-    if (!ctx_) return;
-    if (starting_.exchange(true)) return;
-    auto *ctx = ctx_;
-    auto *flag = &starting_;
-    (void)QtConcurrent::run([ctx, flag]() {
-        anytalk_start(ctx);
-        flag->store(false);
-    });
-}
-
-void AsrController::stopRecording() {
-    if (!ctx_) return;
-    if (stopping_.exchange(true)) return;
-    auto *ctx = ctx_;
-    auto *flag = &stopping_;
-    (void)QtConcurrent::run([ctx, flag]() {
-        anytalk_stop(ctx);
-        flag->store(false);
-    });
-}
-
-void AsrController::cancelRecording() {
-    if (!ctx_) return;
-    auto *ctx = ctx_;
-    (void)QtConcurrent::run([ctx]() { anytalk_cancel(ctx); });
 }
 
 QString AsrController::postProcess(const QString &text) const {
@@ -125,4 +38,117 @@ QString AsrController::postProcess(const QString &text) const {
     QString out = text;
     while (!out.isEmpty() && puncts.contains(out.back())) out.chop(1);
     return out;
+}
+
+// ---- Recording lifecycle ----
+
+void AsrController::startRecording() {
+    if (!backend_) {
+        // Caller should have invoked applyConfig() and got false back; surface
+        // for them so the overlay can pop the SettingsDialog.
+        emit errorOccurred(QStringLiteral("配置缺失，请先填写 AppID / AccessToken"));
+        emit stateChanged(state::Error);
+        return;
+    }
+    if (currentState_ == state::Recording ||
+        currentState_ == state::Connecting) {
+        return;
+    }
+    finalBuffer_.clear();
+    if (!audio_->start()) {
+        // AudioCapture already emitted error → onAudioError handled the rest.
+        return;
+    }
+    currentState_ = state::Connecting;
+    emit stateChanged(currentState_);
+    backend_->start();
+}
+
+void AsrController::stopRecording() {
+    if (currentState_ != state::Recording &&
+        currentState_ != state::Connecting) return;
+    if (audio_) audio_->stop();
+    if (backend_) backend_->stop();
+    // Don't enterIdle yet — the backend still needs to drain remaining
+    // server-side finals after our LAST audio frame. enterIdle runs in
+    // onBackendFinished, which fires after the WebSocket cleanly closes.
+}
+
+void AsrController::cancelRecording() {
+    if (audio_) audio_->stop();
+    if (backend_) backend_->cancel();
+    // Cancel discards: drop accumulated text, no commit. Going straight to
+    // idle is correct here because we don't expect any further finals.
+    finalBuffer_.clear();
+    enterIdle(/*fromError=*/false);
+}
+
+void AsrController::enterIdle(bool fromError) {
+    currentState_ = state::Idle;
+    if (!fromError && !finalBuffer_.isEmpty()) {
+        emit commitText(finalBuffer_);
+    }
+    finalBuffer_.clear();
+    emit stateChanged(currentState_);
+}
+
+// ---- Audio events ----
+
+void AsrController::onAudioPcm(const QByteArray &chunk) {
+    if (backend_ && currentState_ != state::Idle &&
+        currentState_ != state::Error) {
+        backend_->pushPcm(chunk);
+    }
+}
+
+void AsrController::onAudioLevel(double level) {
+    // Throttle to ~20 Hz. AudioCapture fires every 40 ms (~25 Hz); without
+    // this gate every level value re-broadcasts on D-Bus, which is wasteful
+    // when external observers (waybar) are on the bus.
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (now - lastLevelEmitMs_ < 50) return;
+    lastLevelEmitMs_ = now;
+    emit audioLevel(level);
+}
+
+void AsrController::onAudioError(const QString &msg) {
+    finalBuffer_.clear();
+    if (backend_) backend_->cancel();
+    emit errorOccurred(msg);
+    currentState_ = state::Error;
+    emit stateChanged(currentState_);
+}
+
+// ---- Backend events ----
+
+void AsrController::onBackendConnected() {
+    if (currentState_ == state::Connecting) {
+        currentState_ = state::Recording;
+        emit stateChanged(currentState_);
+    }
+}
+
+void AsrController::onBackendPartial(const QString &text) {
+    emit transcriptPartial(text);
+}
+
+void AsrController::onBackendFinal(const QString &text) {
+    const QString processed = postProcess(text);
+    finalBuffer_ += processed;
+    emit transcriptFinal(processed);
+}
+
+void AsrController::onBackendError(const QString &msg) {
+    finalBuffer_.clear();
+    if (audio_) audio_->stop();
+    emit errorOccurred(msg);
+    currentState_ = state::Error;
+    emit stateChanged(currentState_);
+}
+
+void AsrController::onBackendFinished() {
+    if (currentState_ == state::Idle ||
+        currentState_ == state::Error) return;
+    if (audio_) audio_->stop();
+    enterIdle(/*fromError=*/false);
 }
