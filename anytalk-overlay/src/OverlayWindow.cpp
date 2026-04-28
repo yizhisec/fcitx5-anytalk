@@ -1,5 +1,6 @@
 #include "OverlayWindow.h"
 #include "AuroraBars.h"
+#include "OverlayState.h"
 #include "StatusDot.h"
 #include "Theme.h"
 
@@ -93,12 +94,12 @@ OverlayWindow::OverlayWindow(QWidget *parent) : QWidget(parent) {
 
 // ---------- State transitions ----------
 
-void OverlayWindow::onStateChanged(const QString &state) {
-    if (state == QStringLiteral("recording")) {
+void OverlayWindow::onStateChanged(const QString &newState) {
+    if (newState == state::Recording) {
         enterListening(/*connecting=*/false);
-    } else if (state == QStringLiteral("connecting")) {
+    } else if (newState == state::Connecting) {
         enterListening(/*connecting=*/true);
-    } else if (state == QStringLiteral("error")) {
+    } else if (newState == state::Error) {
         if (vis_ != Vis::Error) vis_ = Vis::Error;
     } else {
         enterHidden();

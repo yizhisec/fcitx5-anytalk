@@ -1,8 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
 
-# Building this directory standalone is supported. When pulled in via
-# add_subdirectory() from the root project, the parent's project() applies
-# and we just register the target.
 if(NOT PROJECT_NAME)
     project(anytalk-overlay LANGUAGES CXX)
 endif()
@@ -11,11 +8,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets DBus Concurrent)
-
-# LayerShellQt is optional — required for proper centering on Wayland
-# (KDE/Sway/wlroots). Falls back to standard toplevel when missing.
+find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets DBus Concurrent WebSockets)
 find_package(LayerShellQt QUIET)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(PULSE_SIMPLE REQUIRED IMPORTED_TARGET libpulse-simple)
 
 add_executable(anytalk-overlay
     src/main.cpp
@@ -28,20 +24,24 @@ add_executable(anytalk-overlay
     src/OverlayService.cpp
     src/OverlayWindow.h
     src/OverlayWindow.cpp
+    src/SettingsDialog.h
+    src/SettingsDialog.cpp
     src/AuroraBars.h
     src/AuroraBars.cpp
     src/StatusDot.h
     src/StatusDot.cpp
+    src/audio/AudioCapture.h
+    src/audio/AudioCapture.cpp
+    src/asr/AsrBackend.h
+    src/asr/AsrBackendFactory.h
+    src/asr/AsrBackendFactory.cpp
+    src/asr/VolcengineProtocol.h
+    src/asr/VolcengineProtocol.cpp
+    src/asr/VolcengineBackend.h
+    src/asr/VolcengineBackend.cpp
 )
 
-# Pull libanytalk.so (Zig ASR engine) into the overlay.
-set(_zig_lib "${CMAKE_SOURCE_DIR}/anytalk-lib/zig-out/lib/libanytalk.so")
-target_include_directories(anytalk-overlay PRIVATE
-    ${CMAKE_SOURCE_DIR}/anytalk-lib/include)
-target_link_libraries(anytalk-overlay PRIVATE ${_zig_lib})
-set_target_properties(anytalk-overlay PROPERTIES
-    INSTALL_RPATH "${CMAKE_INSTALL_FULL_LIBDIR}"
-    BUILD_WITH_INSTALL_RPATH TRUE)
+target_include_directories(anytalk-overlay PRIVATE src)
 
 target_link_libraries(anytalk-overlay PRIVATE
     Qt6::Core
@@ -49,6 +49,8 @@ target_link_libraries(anytalk-overlay PRIVATE
     Qt6::Widgets
     Qt6::DBus
     Qt6::Concurrent
+    Qt6::WebSockets
+    PkgConfig::PULSE_SIMPLE
 )
 
 if(LayerShellQt_FOUND)

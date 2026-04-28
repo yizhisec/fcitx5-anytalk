@@ -1,29 +1,29 @@
 #pragma once
-#include "Config.h"
 #include <QObject>
 #include <QString>
-#include <atomic>
 #include <memory>
 
-extern "C" {
-#include "anytalk_api.h"
-}
+class AsrBackend;
+class AudioCapture;
+struct OverlayConfig;
 
-/// Owns the libanytalk.so engine: audio capture + WebSocket ASR.
-/// Translates the C-ABI callback (which fires on a non-Qt thread) into Qt
-/// signals dispatched on the main thread via Qt::QueuedConnection.
+/// Wires AudioCapture (mic input) and an AsrBackend (transcription engine)
+/// together; presents a uniform set of Qt signals to the rest of the app.
+/// Backend-specific knowledge stays inside the AsrBackend implementation.
 class AsrController : public QObject {
     Q_OBJECT
 public:
     explicit AsrController(QObject *parent = nullptr);
     ~AsrController() override;
 
-    /// Initialises libanytalk with the given config. Returns false if the
-    /// engine could not be created.
-    bool initialise(const OverlayConfig &cfg);
+    /// Plug in a fresh config. Replaces current backend if necessary.
+    /// Returns false if the configured backend cannot be instantiated
+    /// (missing credentials, unknown backend name).
+    bool applyConfig(const OverlayConfig &cfg);
 
-    /// Helper: trims punctuation per user setting (matches the addon's prior
-    /// behaviour).
+    /// Best-effort post-processing applied to a final segment before
+    /// commit (e.g. trailing punctuation removal). Future LLM polish
+    /// hooks plug in via this method or a follow-on stage.
     QString postProcess(const QString &text) const;
 
 public slots:
@@ -32,28 +32,34 @@ public slots:
     void cancelRecording();
 
 signals:
-    /// Mirrors anytalk events as Qt signals.
+    /// Mirrors backend events for the UI / D-Bus surface.
     void transcriptPartial(const QString &text);
     void transcriptFinal(const QString &text);
-    void stateChanged(const QString &state);
-    void audioLevel(double level);
+    void stateChanged(const QString &state); // idle / connecting / recording / error
+    void audioLevel(double level);            // 0..1, ~25 Hz
     void errorOccurred(const QString &text);
 
-    /// Emitted when a session finishes naturally with non-empty text. The
-    /// payload is the full accumulated transcript (post-processed). The
-    /// addon turns this into a single commitString() — no streaming preedit.
-    /// Future post-processing steps (LLM polish, translation, etc.) plug in
-    /// before this signal fires.
+    /// Final accumulated transcript ready to be committed (one shot per session).
     void commitText(const QString &text);
 
 private:
-    static void zigCallback(void *user_data, AnytalkEventType type, const char *text);
+    void onAudioPcm(const QByteArray &chunk);
+    void onAudioLevel(double level);
+    void onAudioError(const QString &msg);
 
-    AnytalkContext *ctx_ = nullptr;
+    void onBackendPartial(const QString &text);
+    void onBackendFinal(const QString &text);
+    void onBackendConnected();
+    void onBackendFinished();
+    void onBackendError(const QString &msg);
+
+    void enterIdle(bool fromError);
+
+    std::unique_ptr<AudioCapture> audio_;
+    std::unique_ptr<AsrBackend> backend_;
+
     bool removeTrailingPunctuation_ = false;
-    std::atomic_bool starting_{false};
-    std::atomic_bool stopping_{false};
-
-    // Main-thread state (touched only inside QMetaObject::invokeMethod hops).
-    QString finalBuffer_;  // accumulates all FINAL segments of the current session
+    QString currentState_ = QStringLiteral("idle");
+    QString finalBuffer_;
+    qint64 lastLevelEmitMs_ = 0;
 };

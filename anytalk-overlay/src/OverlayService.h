@@ -37,6 +37,7 @@ public slots:
     Q_SCRIPTABLE void StartRecording();
     Q_SCRIPTABLE void StopRecording();
     Q_SCRIPTABLE void CancelRecording();
+    Q_SCRIPTABLE void OpenSettings();
 
 signals:
     Q_SCRIPTABLE void StateChanged(const QString &state);
@@ -47,6 +48,10 @@ signals:
     /// Final text ready to be committed. Replaces the streaming preedit path:
     /// the addon performs a single ic->commitString(text) when this arrives.
     Q_SCRIPTABLE void CommitText(const QString &text);
+
+    /// In-process: SettingsDialog should open. Not a D-Bus signal — the
+    /// dialog is local UI; D-Bus method `OpenSettings()` triggers it.
+    void openSettingsRequested();
 
 private:
     OverlayWindow *window_;

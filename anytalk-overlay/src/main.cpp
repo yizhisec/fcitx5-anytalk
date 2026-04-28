@@ -2,6 +2,7 @@
 #include "Config.h"
 #include "OverlayService.h"
 #include "OverlayWindow.h"
+#include "SettingsDialog.h"
 
 #include <QApplication>
 #include <QCommandLineParser>
@@ -12,10 +13,21 @@
 #  define ANYTALK_HAS_LAYER_SHELL 1
 #endif
 
+namespace {
+
+/// Show the SettingsDialog and, on Save, push the new config into the
+/// running AsrController so the user can record without restarting the
+/// overlay.
+bool runSettingsDialog(AsrController &asr) {
+    SettingsDialog dlg(OverlayConfig::load());
+    if (dlg.exec() != QDialog::Accepted) return false;
+    asr.applyConfig(dlg.config());
+    return true;
+}
+
+} // namespace
+
 int main(int argc, char **argv) {
-    // On Wayland, xdg-shell forbids client-controlled placement so move()
-    // is a no-op. Use wlr-layer-shell (via LayerShellQt) for proper centering
-    // on KDE/Sway/wlroots. Falls back to standard toplevel under X11/GNOME.
 #ifdef ANYTALK_HAS_LAYER_SHELL
     if (qgetenv("XDG_SESSION_TYPE") == "wayland") {
         LayerShellQt::Shell::useLayerShell();
@@ -31,14 +43,23 @@ int main(int argc, char **argv) {
     parser.setApplicationDescription("Aurora-style voice activation overlay for fcitx5-anytalk");
     parser.addHelpOption();
     parser.addVersionOption();
+    QCommandLineOption settingsOption(QStringLiteral("settings"),
+                                       QStringLiteral("Open the settings dialog and exit."));
+    parser.addOption(settingsOption);
     parser.process(app);
 
     OverlayWindow overlay;
 
     AsrController asr;
-    if (!asr.initialise(OverlayConfig::load())) {
-        qWarning() << "anytalk-overlay: ASR engine failed to initialise. "
-                      "Recording will not work. Check ~/.config/fcitx5/conf/anytalk.conf.";
+    OverlayConfig cfg = OverlayConfig::load();
+    if (!asr.applyConfig(cfg)) {
+        qWarning() << "anytalk-overlay: ASR backend not configured. The first F2 will "
+                      "open the settings dialog.";
+    }
+
+    // CLI-driven settings: launch dialog and exit.
+    if (parser.isSet(settingsOption)) {
+        return runSettingsDialog(asr) ? 0 : 1;
     }
 
     OverlayService service(&overlay, &asr);
@@ -60,9 +81,7 @@ int main(int argc, char **argv) {
     QObject::connect(&asr, &AsrController::errorOccurred,
                      &overlay, &OverlayWindow::onErrorOccurred);
 
-    // Re-broadcast ASR events on D-Bus so the fcitx5 addon (and any other
-    // observer) can react. The addon uses TranscriptFinal to commit text and
-    // TranscriptPartial to drive preedit.
+    // Re-broadcast on D-Bus.
     QObject::connect(&asr, &AsrController::stateChanged, &service,
                      &OverlayService::StateChanged);
     QObject::connect(&asr, &AsrController::audioLevel, &service,
@@ -75,6 +94,11 @@ int main(int argc, char **argv) {
                      &OverlayService::ErrorOccurred);
     QObject::connect(&asr, &AsrController::commitText, &service,
                      &OverlayService::CommitText);
+
+    // Settings dialog can be triggered through the addon (or any client) via
+    // OverlayService::OpenSettings → openSettingsRequested.
+    QObject::connect(&service, &OverlayService::openSettingsRequested, &app,
+                     [&asr]() { runSettingsDialog(asr); });
 
     return app.exec();
 }
