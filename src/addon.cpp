@@ -106,6 +106,8 @@ void AnyTalkEngine::handleGlobalKeyEvent(fcitx::Event &event) {
         state = current_state_;
     }
     const bool is_recording = (state == Constants::STATE_RECORDING);
+    const bool is_connecting = (state == Constants::STATE_CONNECTING);
+    const bool is_active = is_recording || is_connecting;
     const bool is_error = (state == Constants::STATE_ERROR);
 
     // Enter while recording → commit (overlay does Stop, the eventual final
@@ -116,12 +118,12 @@ void AnyTalkEngine::handleGlobalKeyEvent(fcitx::Event &event) {
         return;
     }
 
-    // Escape during recording = cancel; during the error toast = dismiss.
-    // We can't rely on the overlay window receiving focus on Wayland
-    // (layer-shell with OnDemand keyboard interactivity), so the addon's
-    // global watcher handles it.
+    // Escape during an active session = cancel (works in both Connecting and
+    // Recording); during the error toast = dismiss. We can't rely on the
+    // overlay window receiving focus on Wayland (layer-shell with OnDemand
+    // keyboard interactivity), so the addon's global watcher handles it.
     if (keyEvent.key().sym() == FcitxKey_Escape) {
-        if (is_recording) {
+        if (is_active) {
             overlayCall("CancelRecording");
             applyState(Constants::STATE_IDLE);
             keyEvent.accept();
@@ -142,6 +144,11 @@ void AnyTalkEngine::handleGlobalKeyEvent(fcitx::Event &event) {
     if (keyEvent.key().sym() == FcitxKey_F2 || keyEvent.key().sym() == FcitxKey_AudioPlay) {
         if (is_recording) {
             overlayCall("StopRecording");
+        } else if (is_connecting) {
+            // Cancel rather than stop: nothing has been recognized yet, so
+            // there's no transcript to commit and the user just wants out.
+            overlayCall("CancelRecording");
+            applyState(Constants::STATE_IDLE);
         } else if (is_error) {
             overlayCall("Hide");
             applyState(Constants::STATE_IDLE);
