@@ -15,7 +15,8 @@
 - `cmake --build build`: build addon + overlay.
 - `sudo cmake --install build`: install both.
 - **Force-copy after build** if `cmake --install` reports "Up-to-date" but binary is stale: `sudo cp -f build/anytalk-overlay/anytalk-overlay /usr/bin/anytalk-overlay`.
-- `pkill -x anytalk-overlay`: drop the running overlay so the next F2 picks up the new binary (D-Bus activation re-spawns it).
+- Uninstall before reinstall (avoid stale files from renamed/moved targets): `sudo xargs rm -f < build/install_manifest.txt`.
+- `pkill -x anytalk-overlay`: drop the running overlay; next `fcitx5 -r` will respawn it via the addon's `wakeOverlay()` (NOT auto-activated by F2 anymore).
 - `fcitx5 -r`: reload the addon side after `anytalk.so` changes.
 - `anytalk-overlay --settings`: open the settings dialog from the command line.
 
@@ -42,6 +43,7 @@
 - D-Bus session-bus activation auto-launches the overlay on first method call. To make activation work on Sway / wlroots, the addon pushes WAYLAND_DISPLAY etc. into the bus daemon at load time via `UpdateActivationEnvironment`.
 - The legacy `org.fcitx.Fcitx5.AnyTalk` `StateChanged` D-Bus signal is preserved for waybar custom-module integrations.
 - F2/Esc/Enter are watched via `InputContextKeyEvent` — they only fire when a focused app exposes an InputContext. Empty workspaces / desktop-with-no-window will not trigger the addon. For full coverage, bind the keys at compositor level to `busctl --user call ... ToggleRecording` (see README).
+- Overlay lifecycle is owned by the addon. `wakeOverlay()` in the addon constructor sends a `Ping` to trigger D-Bus auto-activation at fcitx5 load / `fcitx5 -r`. F2/Esc go through `overlayCall()` which gates on `bus->serviceOwner(...).empty()` — so `pkill -x anytalk-overlay` is *final* until the next `fcitx5 -r`. This is intentional: re-spawning into a half-released kernel BT SCO state was the freeze.
 
 ## Wayland & Multi-monitor Notes
 - LayerShellQt: not calling `setScreen()` does **not** mean "compositor decides". It falls back to `QWindow::screen()` (i.e. primary). To follow the active output use `ls->setWantsToBeOnActiveScreen(true)` (LayerShellQt ≥ 6.6).

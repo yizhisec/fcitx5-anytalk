@@ -15,8 +15,8 @@ class DBusModule;
 /// Minimal fcitx5 addon — a dumb forwarder for the anytalk-overlay process.
 ///
 /// All recording state lives in the overlay; this addon only does:
-///   1. Watch F2 / Esc / Enter globally and forward to the overlay over D-Bus
-///      (`ToggleRecording` / `CancelRecording` / `StopRecording`). The overlay
+///   1. Watch F2 / Esc globally and forward to the overlay over D-Bus
+///      (`ToggleRecording` / `CancelRecording`). The overlay
 ///      decides whether each call is a no-op or an action based on its own
 ///      state — we never cache it here.
 ///   2. Subscribe to the overlay's `CommitText` signal and translate it into
@@ -38,6 +38,7 @@ private:
     void handleGlobalKeyEvent(fcitx::Event &event);
 
     void overlayCall(const char *method);
+    void wakeOverlay(fcitx::dbus::Bus *bus);
     void pushDBusEnv(fcitx::dbus::Bus *bus);
     void connectOverlaySignals(fcitx::dbus::Bus *bus);
     void commitText(const std::string &text);
