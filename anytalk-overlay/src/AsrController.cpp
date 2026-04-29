@@ -4,10 +4,10 @@
 #include "asr/AsrBackend.h"
 #include "asr/AsrBackendFactory.h"
 #include "audio/AudioCapture.h"
-#include "audio/PulseSourceProbe.h"
 
 #include <QDateTime>
 #include <QDebug>
+#include <cmath>
 
 AsrController::AsrController(QObject *parent) : QObject(parent) {}
 AsrController::~AsrController() = default;
@@ -32,44 +32,6 @@ bool AsrController::applyConfig(const OverlayConfig &cfg) {
         connect(audio_.get(), &AudioCapture::warmedUp, this,
                 &AsrController::onAudioWarmedUp);
     }
-
-    // Pick capture mode. Auto = probe default PA source; on-demand for
-    // Bluetooth (HFP/SCO unsafe under always-on, see CLAUDE.md), always-on
-    // otherwise. Probe failure is treated as "unknown — assume risky" and
-    // also flips us to on-demand. User can override via [Audio] CaptureMode.
-    bool onDemand = false;
-    QString modeReason;
-    switch (cfg.captureMode) {
-        case CaptureMode::AlwaysOn:
-            onDemand = false;
-            modeReason = QStringLiteral("forced always-on by config");
-            break;
-        case CaptureMode::OnDemand:
-            onDemand = true;
-            modeReason = QStringLiteral("forced on-demand by config");
-            break;
-        case CaptureMode::Auto: {
-            const auto info = anytalk::probeDefaultSource();
-            if (!info) {
-                onDemand = true;
-                modeReason = QStringLiteral("probe failed; defaulting to on-demand");
-            } else if (info->isBluetooth()) {
-                onDemand = true;
-                modeReason = QStringLiteral("Bluetooth source detected (%1)").arg(info->name);
-            } else {
-                onDemand = false;
-                modeReason = QStringLiteral("non-BT source (%1)").arg(info->name);
-            }
-            break;
-        }
-    }
-    audio_->setOnDemand(onDemand);
-    qInfo().noquote() << "AsrController: capture mode ="
-                      << (onDemand ? "on-demand" : "always-on") << "—" << modeReason;
-
-    // Pre-warm only in always-on mode. On-demand pays the stream-open cost
-    // on the first F2 by design — that's the whole point.
-    if (!onDemand) audio_->prewarm();
     return true;
 }
 
@@ -97,16 +59,13 @@ void AsrController::startRecording() {
     }
     finalBuffer_.clear();
     wsConnected_ = false;
-    // mic warm-up is sticky across sessions: once the PA stream has produced
-    // real audio, every subsequent F2 hits a hot mic.
-    audioWarmedUp_ = audio_ && audio_->isWarmedUp();
-    if (!audio_->start()) {
-        // AudioCapture already emitted error → onAudioError handled the rest.
-        return;
-    }
+    audioWarmedUp_ = false;
     currentState_ = state::Connecting;
     emit stateChanged(currentState_);
+    // Both return immediately; WS handshake, pa_simple_new(), and PA
+    // warm-up all overlap. PA failure surfaces via onAudioError.
     backend_->start();
+    audio_->start();
 }
 
 void AsrController::stopRecording() {
@@ -135,6 +94,7 @@ void AsrController::cancelRecording() {
     // idle is correct here because we don't expect any further finals.
     finalBuffer_.clear();
     enterIdle(/*fromError=*/false);
+    emit cancelled();
 }
 
 void AsrController::enterIdle(bool fromError) {
@@ -156,32 +116,26 @@ void AsrController::onAudioPcm(const QByteArray &chunk) {
 }
 
 void AsrController::onAudioLevel(double level) {
-    // Throttle to ~20 Hz. AudioCapture fires every 40 ms (~25 Hz); without
-    // this gate every level value re-broadcasts on D-Bus, which is wasteful
-    // when external observers (waybar) are on the bus.
+    // Throttle to ~20 Hz and dedup identical buckets — without this every
+    // 40 ms read re-broadcasts on D-Bus, including the long stretch of
+    // 0.0 readings during silence that waybar observers don't care about.
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     if (now - lastLevelEmitMs_ < 50) return;
+    const double bucket = std::round(level * 100.0) / 100.0;
+    if (qFuzzyCompare(bucket, lastEmittedLevel_)) return;
     lastLevelEmitMs_ = now;
-    emit audioLevel(level);
+    lastEmittedLevel_ = bucket;
+    emit audioLevel(bucket);
 }
 
 void AsrController::onAudioError(const QString &msg) {
-    // Mic died mid-session (bluetooth headset out of battery, USB unplug,
-    // PulseAudio source recycle, etc.). If the user already had a Recording
-    // session going, keep whatever was recognized and ask the backend to
-    // drain — the server already has the audio it needs for a final pass,
-    // and committing partial text is strictly better than dropping it on
-    // the floor. The backend's stop() sends a LAST frame; onBackendFinished
-    // will flush finalBuffer_ via the normal commitText path.
+    // Recording state: drain via backend->stop() so any partials we have
+    // become a final commit instead of being dropped on the floor.
     if (backend_ && currentState_ == state::Recording) {
         backend_->stop();
-        // currentState_ stays Recording until onBackendFinished — same as a
-        // user-initiated F2 stop. We surface the error to the UI but don't
-        // tear the session down.
         emit errorOccurred(msg);
         return;
     }
-    // Connecting / Idle / Error: nothing recognized yet, abandon.
     finalBuffer_.clear();
     if (backend_) backend_->cancel();
     emit errorOccurred(msg);

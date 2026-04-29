@@ -1,5 +1,6 @@
 #include "OverlayService.h"
 #include "AsrController.h"
+#include "OverlayState.h"
 #include "OverlayWindow.h"
 
 #include <QDBusConnection>
@@ -35,14 +36,12 @@ bool OverlayService::registerOnBus() {
 }
 
 void OverlayService::Show() {
-    if (window_) window_->onStateChanged(QStringLiteral("recording"));
+    if (window_) window_->onStateChanged(state::Recording);
 }
 
 void OverlayService::Hide() {
-    if (window_) window_->onStateChanged(QStringLiteral("idle"));
+    if (window_) window_->onStateChanged(state::Idle);
 }
-
-void OverlayService::Ping() {}
 
 void OverlayService::ToggleRecording() {
     if (asr_) asr_->toggleRecording();
@@ -58,6 +57,11 @@ void OverlayService::StopRecording() {
 
 void OverlayService::CancelRecording() {
     if (asr_) asr_->cancelRecording();
+    // Also serves as the escape-while-waiting-for-Ack path so the user
+    // doesn't pay the 5 s ackTimer when they hit Esc post-commit.
+    emit cancelEscape();
 }
 
 void OverlayService::OpenSettings() { emit openSettingsRequested(); }
+
+void OverlayService::Acknowledge() { emit ackReceived(); }

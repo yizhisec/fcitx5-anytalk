@@ -1,9 +1,24 @@
 #include "VolcengineBackend.h"
 
 #include <QDebug>
+#include <QMetaEnum>
 #include <QNetworkRequest>
+#include <QSslError>
+#include <QTimer>
 #include <QUrl>
 #include <QWebSocket>
+
+namespace {
+// 10 s — fail fast on bad token / DNS, survive Wi-Fi roaming.
+constexpr int kHandshakeTimeoutMs = 10'000;
+
+template <typename E>
+QString enumName(E v) {
+    static const auto meta = QMetaEnum::fromType<E>();
+    const char *name = meta.valueToKey(static_cast<int>(v));
+    return QString::fromLatin1(name ? name : "?");
+}
+} // namespace
 
 namespace {
 constexpr const char *kHost = "openspeech.bytedance.com";
@@ -16,7 +31,11 @@ QString pathForMode(const QString &mode) {
 } // namespace
 
 VolcengineBackend::VolcengineBackend(Settings settings, QObject *parent)
-    : AsrBackend(parent), settings_(std::move(settings)) {}
+    : AsrBackend(parent), settings_(std::move(settings)) {
+    handshakeTimer_.setSingleShot(true);
+    connect(&handshakeTimer_, &QTimer::timeout,
+            this, &VolcengineBackend::onHandshakeTimeout);
+}
 
 VolcengineBackend::~VolcengineBackend() = default;
 
@@ -26,6 +45,11 @@ void VolcengineBackend::openWebSocket() {
     connect(ws_.get(), &QWebSocket::binaryMessageReceived, this, &VolcengineBackend::onWsBinary);
     connect(ws_.get(), &QWebSocket::errorOccurred, this, &VolcengineBackend::onWsError);
     connect(ws_.get(), &QWebSocket::disconnected, this, &VolcengineBackend::onWsDisconnected);
+    // Qt 6 emits a generic "processHandshake unknown error condition" qWarning
+    // when SSL/HTTP-upgrade parsing fails; surface the real cause via these.
+    connect(ws_.get(), &QWebSocket::sslErrors, this, &VolcengineBackend::onWsSslErrors);
+    connect(ws_.get(), &QWebSocket::stateChanged,
+            this, &VolcengineBackend::onWsStateChanged);
 
     QNetworkRequest req(QUrl(QStringLiteral("wss://%1%2").arg(kHost, pathForMode(settings_.mode))));
     req.setRawHeader("X-Api-App-Key", settings_.appId.toUtf8());
@@ -34,6 +58,8 @@ void VolcengineBackend::openWebSocket() {
     req.setRawHeader("X-Api-Connect-Id",
                      QUuid::createUuid().toString(QUuid::WithoutBraces).toUtf8());
     ws_->open(req);
+
+    handshakeTimer_.start(kHandshakeTimeoutMs);
 }
 
 void VolcengineBackend::start() {
@@ -79,6 +105,7 @@ void VolcengineBackend::cancel() {
 }
 
 void VolcengineBackend::onWsConnected() {
+    handshakeTimer_.stop();
     if (state_ != State::Connecting) return;
     emit connected();
     state_ = State::Recording;
@@ -119,7 +146,9 @@ void VolcengineBackend::onWsBinary(const QByteArray &data) {
     }
 }
 
-void VolcengineBackend::onWsError(QAbstractSocket::SocketError) {
+void VolcengineBackend::onWsError(QAbstractSocket::SocketError err) {
+    qWarning().noquote() << "VolcengineBackend: ws error" << enumName(err)
+                         << "—" << (ws_ ? ws_->errorString() : QStringLiteral("(no ws)"));
     if (state_ == State::Idle) return;
     teardown(ws_ ? ws_->errorString() : QStringLiteral("WebSocket error"));
 }
@@ -130,7 +159,29 @@ void VolcengineBackend::onWsDisconnected() {
     teardown({});
 }
 
+void VolcengineBackend::onWsSslErrors(const QList<QSslError> &errors) {
+    // Don't auto-ignoreSslErrors() — want bad certs / MITM to surface as a
+    // hard error. Just log so the user / postmortem can see the actual
+    // failure cause behind Qt's generic "unknown error condition" warning.
+    for (const auto &e : errors) {
+        qWarning().noquote() << "VolcengineBackend: ssl error" << e.errorString();
+    }
+}
+
+void VolcengineBackend::onWsStateChanged(QAbstractSocket::SocketState s) {
+    qInfo().noquote() << "VolcengineBackend: ws state →" << enumName(s);
+}
+
+void VolcengineBackend::onHandshakeTimeout() {
+    if (state_ != State::Connecting) return;
+    qWarning() << "VolcengineBackend: handshake timeout after"
+               << kHandshakeTimeoutMs << "ms — aborting";
+    teardown(QStringLiteral("连接超时（%1 秒未握手成功）")
+             .arg(kHandshakeTimeoutMs / 1000));
+}
+
 void VolcengineBackend::teardown(const QString &errorMessage) {
+    handshakeTimer_.stop();
     if (ws_) {
         // teardown() can be called from within a QWebSocket signal slot
         // (binaryMessageReceived, errorOccurred, disconnected). Destroying

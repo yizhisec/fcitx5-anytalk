@@ -4,7 +4,10 @@
 
 #include <QAbstractSocket>
 #include <QByteArray>
+#include <QList>
+#include <QSslError>
 #include <QString>
+#include <QTimer>
 #include <QUuid>
 #include <memory>
 
@@ -47,6 +50,9 @@ private slots:
     void onWsBinary(const QByteArray &data);
     void onWsError(QAbstractSocket::SocketError err);
     void onWsDisconnected();
+    void onWsSslErrors(const QList<QSslError> &errors);
+    void onWsStateChanged(QAbstractSocket::SocketState state);
+    void onHandshakeTimeout();
 
 private:
     enum class State { Idle, Connecting, Recording, Stopping };
@@ -68,4 +74,9 @@ private:
     // Per-connection sequence: full client request gets 1, audio frames 2..N.
     // The protocol rejects mixed seq/no-seq frames within one connection.
     qint32 nextSeq_ = 1;
+
+    // QWebSocket has no built-in handshake timeout — a TLS-completed but
+    // upgrade-stuck server would hang in Connecting forever. Fires
+    // teardown() with a clear error so the UI can recover.
+    QTimer handshakeTimer_;
 };

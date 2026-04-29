@@ -10,6 +10,7 @@ struct OverlayConfig;
 /// Wires AudioCapture (mic input) and an AsrBackend (transcription engine)
 /// together; presents a uniform set of Qt signals to the rest of the app.
 /// Backend-specific knowledge stays inside the AsrBackend implementation.
+/// Owned by main(); single session per process.
 class AsrController : public QObject {
     Q_OBJECT
 public:
@@ -22,8 +23,7 @@ public:
     bool applyConfig(const OverlayConfig &cfg);
 
     /// Best-effort post-processing applied to a final segment before
-    /// commit (e.g. trailing punctuation removal). Future LLM polish
-    /// hooks plug in via this method or a follow-on stage.
+    /// commit (e.g. trailing punctuation removal).
     QString postProcess(const QString &text) const;
 
 public slots:
@@ -44,6 +44,9 @@ signals:
 
     /// Final accumulated transcript ready to be committed (one shot per session).
     void commitText(const QString &text);
+    /// Cancellation completed (no commit, no error). Drives short-lived
+    /// overlay's exit on Esc/cancel paths.
+    void cancelled();
 
 private:
     void onAudioPcm(const QByteArray &chunk);
@@ -67,6 +70,7 @@ private:
     QString currentState_ = QStringLiteral("idle");
     QString finalBuffer_;
     qint64 lastLevelEmitMs_ = 0;
+    double lastEmittedLevel_ = -1.0;  // sentinel: never matches a [0,1] bucket
     // Recording = ws connected AND mic produced real audio. Both flags are
     // set by their respective callbacks; the transition happens in
     // maybeEnterRecording() once both are true.

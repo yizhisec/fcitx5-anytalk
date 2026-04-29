@@ -39,7 +39,6 @@ private:
     void handleGlobalKeyEvent(fcitx::Event &event);
 
     void overlayCall(const char *method);
-    void wakeOverlay(fcitx::dbus::Bus *bus);
     void pushDBusEnv(fcitx::dbus::Bus *bus);
     void connectOverlaySignals(fcitx::dbus::Bus *bus);
     void commitText(const std::string &text);

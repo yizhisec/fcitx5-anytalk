@@ -29,5 +29,4 @@ private:
     QLineEdit *tokenEdit_ = nullptr;
     QComboBox *volcModeCombo_ = nullptr;
     QCheckBox *trimCheck_ = nullptr;
-    QComboBox *captureModeCombo_ = nullptr;
 };

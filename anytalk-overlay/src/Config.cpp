@@ -25,26 +25,6 @@ bool toBool(const QString &v, bool fallback) {
     return fallback;
 }
 
-CaptureMode parseCaptureMode(const QString &v, CaptureMode fallback) {
-    const QString s = v.trimmed().toLower();
-    if (s == QLatin1String("auto")) return CaptureMode::Auto;
-    if (s == QLatin1String("always-on") || s == QLatin1String("alwayson") ||
-        s == QLatin1String("always_on"))
-        return CaptureMode::AlwaysOn;
-    if (s == QLatin1String("on-demand") || s == QLatin1String("ondemand") ||
-        s == QLatin1String("on_demand"))
-        return CaptureMode::OnDemand;
-    return fallback;
-}
-
-QString captureModeToString(CaptureMode m) {
-    switch (m) {
-        case CaptureMode::AlwaysOn: return QStringLiteral("always-on");
-        case CaptureMode::OnDemand: return QStringLiteral("on-demand");
-        case CaptureMode::Auto: break;
-    }
-    return QStringLiteral("auto");
-}
 } // namespace
 
 QString OverlayConfig::configFilePath() {
@@ -118,13 +98,8 @@ OverlayConfig OverlayConfig::load() {
             } else {
                 cfg.backendOptions.insert(joinKey(currentSection, key), val);
             }
-        } else if (currentSection == QLatin1String("Audio")) {
-            if (key == QLatin1String("CaptureMode")) {
-                cfg.captureMode = parseCaptureMode(val, CaptureMode::Auto);
-            } else {
-                cfg.backendOptions.insert(joinKey(currentSection, key), val);
-            }
         } else {
+            // Unknown sections fall through to the per-backend bag.
             cfg.backendOptions.insert(joinKey(currentSection, key), val);
         }
     }
@@ -157,12 +132,6 @@ bool OverlayConfig::save() const {
     out << "[Asr]\n";
     out << "Backend = " << backend << "\n";
     out << "RemoveTrailingPunctuation = " << (removeTrailingPunctuation ? "True" : "False") << "\n";
-
-    out << "\n[Audio]\n";
-    out << "# auto = probe default source; on-demand for Bluetooth, always-on otherwise.\n";
-    out << "# always-on = best first-press latency; unsafe for Bluetooth HFP/SCO mics.\n";
-    out << "# on-demand = always-safe; ~1 s of zero padding on first PCM after F2.\n";
-    out << "CaptureMode = " << captureModeToString(captureMode) << "\n";
 
     // Group backendOptions by section.
     QHash<QString, QVariantHash> bySection;

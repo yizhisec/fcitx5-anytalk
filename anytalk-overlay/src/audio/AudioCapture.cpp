@@ -12,21 +12,15 @@ AudioCapture::~AudioCapture() {
     teardownStream();
 }
 
-void AudioCapture::setOnDemand(bool onDemand) {
-    onDemand_.store(onDemand, std::memory_order_release);
-}
-
 void AudioCapture::teardownStream() {
     running_.store(false, std::memory_order_release);
     if (thread_) {
         // Cap how long we wait for the capture thread to drop out of
         // pa_simple_read. PulseAudio / bluetooth daemons occasionally hang
         // (BT profile renegotiation, source disappearing) and a blind
-        // wait() pins the entire overlay process — that in turn keeps the
-        // D-Bus name owned, so the next F2 thinks overlay is still up and
-        // won't activate a fresh one. Better to leak the thread +
-        // pa_simple_t and let the kernel clean up at exit() than to
-        // deadlock here.
+        // wait() pins the entire overlay process. Better to leak the
+        // thread + pa_simple_t and let the kernel clean up at exit() than
+        // to deadlock here.
         constexpr unsigned long kShutdownTimeoutMs = 2000;
         if (!thread_->wait(kShutdownTimeoutMs)) {
             qWarning() << "AudioCapture: capture thread did not exit in"
@@ -47,14 +41,35 @@ void AudioCapture::teardownStream() {
     warmedUp_.store(false, std::memory_order_release);
 }
 
-bool AudioCapture::prewarm() {
-    if (pa_ && running_.load(std::memory_order_acquire)) return true;
-
-    // Clean up after a dead thread (read failed in captureLoop) or a
-    // previous on-demand stop(). teardownStream() handles the bounded
-    // wait + leak fallback if PA wedged.
+bool AudioCapture::start() {
+    // Idempotent: if a previous start() left a live stream, just flip the
+    // forwarding flag.
+    if (pa_ && running_.load(std::memory_order_acquire)) {
+        active_.store(true, std::memory_order_release);
+        return true;
+    }
     teardownStream();
 
+    // Don't open the PA stream here — pa_simple_new() blocks for ~200 ms
+    // building the connection to the PA daemon, which would serialize
+    // against AsrController's WS handshake. Spawn the read thread now
+    // and let pa_simple_new run as its first instruction inside the
+    // thread; the caller's thread returns immediately so the WS handshake
+    // overlaps with both PA open and PA warm-up.
+    running_.store(true, std::memory_order_release);
+    active_.store(true, std::memory_order_release);
+    thread_ = QThread::create([this] { captureLoop(); });
+    thread_->setObjectName(QStringLiteral("anytalk-capture"));
+    thread_->start();
+    return true;
+}
+
+void AudioCapture::stop() {
+    active_.store(false, std::memory_order_release);
+    teardownStream();
+}
+
+void AudioCapture::captureLoop() {
     pa_sample_spec spec{};
     spec.format = PA_SAMPLE_S16LE;
     spec.rate = kSampleRate;
@@ -73,54 +88,16 @@ bool AudioCapture::prewarm() {
     if (!pa) {
         qWarning() << "AudioCapture: pa_simple_new failed:" << pa_strerror(paErr);
         emit error(QStringLiteral("麦克风不可用，请检查 PulseAudio/PipeWire 或音频设备"));
-        return false;
-    }
-
-    pa_ = pa;
-    running_.store(true, std::memory_order_release);
-    thread_ = QThread::create([this] { captureLoop(); });
-    thread_->setObjectName(QStringLiteral("anytalk-capture"));
-    thread_->start();
-    return true;
-}
-
-bool AudioCapture::start() {
-    // Rebuild if the previous stream died in captureLoop.
-    if (!pa_ || !running_.load(std::memory_order_acquire)) {
-        if (!prewarm()) return false;
-    }
-    active_.store(true, std::memory_order_release);
-    return true;
-}
-
-void AudioCapture::stop() {
-    active_.store(false, std::memory_order_release);
-    if (!onDemand_.load(std::memory_order_acquire)) {
-        // Always-on path: keep the PA stream open and the thread reading
-        // (discarding output) so the source doesn't suspend — that
-        // suspend ramp-up costs ~1 s of zero padding on the next start()
-        // and is the single biggest hit to first-press responsiveness
-        // when switching applications. Safe for ALSA / USB mics.
+        running_.store(false, std::memory_order_release);
         return;
     }
-    // On-demand path: actually release the stream so the kernel can drop
-    // the source (and any Bluetooth HFP/SCO link). Trades 1 s of
-    // first-press silence for not pinning a SCO link the user might
-    // need to release safely. See CLAUDE.md "Bluetooth mic warning".
-    teardownStream();
-}
+    pa_ = pa;
 
-void AudioCapture::captureLoop() {
     QByteArray buf;
     buf.resize(kChunkBytes);
-    auto *pa = static_cast<pa_simple *>(pa_);
     while (running_.load(std::memory_order_acquire)) {
         int err = 0;
         if (pa_simple_read(pa, buf.data(), buf.size(), &err) < 0) {
-            // PulseAudio occasionally recycles long-lived streams; surfacing
-            // an error mid-recording would be confusing, so only emit when
-            // a session is actually live. Either way the next start() will
-            // detect the dead thread and rebuild.
             qWarning() << "AudioCapture: pa_simple_read failed:" << pa_strerror(err);
             if (active_.load(std::memory_order_acquire)) {
                 emit error(QStringLiteral("音频读取失败"));

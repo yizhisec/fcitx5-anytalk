@@ -25,9 +25,12 @@ AnyTalkEngine::AnyTalkEngine(fcitx::Instance *instance) : instance_(instance) {
     auto *dbusAddon = dbus();
     if (dbusAddon) {
         if (auto *bus = dbusAddon->call<fcitx::IDBusModule::bus>()) {
+            // Push graphical-env vars so the D-Bus-activated overlay
+            // process inherits WAYLAND_DISPLAY etc. on Sway / wlroots.
             pushDBusEnv(bus);
+            // Subscribe before any overlay is alive — D-Bus auto-activation
+            // can spawn one between F2 and our match-rule registration.
             connectOverlaySignals(bus);
-            wakeOverlay(bus);
         }
     }
 
@@ -45,12 +48,9 @@ void AnyTalkEngine::handleGlobalKeyEvent(fcitx::Event &event) {
 
     // Dumb forward — the overlay is the state owner and decides whether each
     // method is a no-op (idle) or an action (active session). F2/AudioPlay
-    // are swallowed (unambiguously ours); Esc and Enter are forwarded but
-    // also passed through to the focused application so the user's natural
-    // "cancel and close dialog" / "commit transcript and send the line"
-    // expectations both work. Safe to forward Enter again now that
-    // overlayCall() gates on bus->serviceOwner — no more accidental
-    // auto-activation when overlay is dead (pre-pkill freeze trigger).
+    // are swallowed (unambiguously ours); Esc and Enter pass through to the
+    // focused application so the user's natural "cancel and close dialog" /
+    // "commit transcript and send the line" expectations both work.
     const auto sym = keyEvent.key().sym();
     if (sym == FcitxKey_F2 || sym == FcitxKey_AudioPlay) {
         overlayCall("ToggleRecording");
@@ -72,28 +72,8 @@ void AnyTalkEngine::overlayCall(const char *method) {
     if (!dbusAddon) return;
     auto *bus = dbusAddon->call<fcitx::IDBusModule::bus>();
     if (!bus) return;
-    // Skip if overlay is not running. We deliberately do NOT let D-Bus
-    // auto-activation re-spawn it here: after `pkill`, the BT SCO link
-    // may be in a half-released kernel state (CVE-2025-40309 family),
-    // and a fresh overlay racing on the same device tends to wedge the
-    // seat. wakeOverlay() at addon construct is the only spawn path.
-    if (bus->serviceOwner(kOverlayService, /*usec=*/100000).empty()) return;
     auto msg = bus->createMethodCall(kOverlayService, kOverlayPath,
                                       kOverlayInterface, method);
-    msg.send();
-}
-
-void AnyTalkEngine::wakeOverlay(fcitx::dbus::Bus *bus) {
-    // Trigger D-Bus session-bus auto-activation so the overlay is alive
-    // before the user touches F2. We deliberately bypass overlayHasOwner()
-    // — that gate prevents "F2 right after pkill" from re-spawning, but
-    // at addon load (fresh fcitx5 boot OR `fcitx5 -r`) we *want* to spawn.
-    // Fire-and-forget Ping; if the overlay is already up the call is a
-    // no-op, and if it's down the daemon will spawn it via the .service
-    // file.
-    if (!bus) return;
-    auto msg = bus->createMethodCall(kOverlayService, kOverlayPath,
-                                      kOverlayInterface, "Ping");
     msg.send();
 }
 
@@ -142,10 +122,15 @@ void AnyTalkEngine::connectOverlaySignals(fcitx::dbus::Bus *bus) {
 }
 
 void AnyTalkEngine::commitText(const std::string &text) {
-    if (text.empty()) return;
-    auto *ic = instance_->inputContextManager().lastFocusedInputContext();
-    if (!ic) return;
-    ic->commitString(text);
+    // Always Acknowledge — empty text or no focused IC still need to
+    // release the overlay's exit gate, otherwise it spins on the 5 s
+    // ackTimer.
+    if (!text.empty()) {
+        if (auto *ic = instance_->inputContextManager().lastFocusedInputContext()) {
+            ic->commitString(text);
+        }
+    }
+    overlayCall("Acknowledge");
 }
 
 class AnyTalkFactory : public fcitx::AddonFactory {

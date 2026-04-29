@@ -9,6 +9,7 @@
 #include <QCommandLineParser>
 #include <QDebug>
 #include <QSocketNotifier>
+#include <QTimer>
 
 #include <csignal>
 #include <cstdlib>
@@ -140,11 +141,74 @@ int main(int argc, char **argv) {
                      &OverlayService::ErrorOccurred);
     QObject::connect(&asr, &AsrController::commitText, &service,
                      &OverlayService::CommitText);
+    QObject::connect(&asr, &AsrController::cancelled, &service,
+                     &OverlayService::Cancelled);
 
     // Settings dialog can be triggered through the addon (or any client) via
     // OverlayService::OpenSettings → openSettingsRequested.
     QObject::connect(&service, &OverlayService::openSettingsRequested, &app,
                      [&asr]() { runSettingsDialog(asr); });
+
+    // ---- Short-lived process exit logic ----
+    //
+    // Exit paths:
+    //   1. CommitText emitted → wait up to 5 s for the addon's
+    //      Acknowledge() callback, then QApplication::quit() (clean dtors —
+    //      PA stream, layer-shell surface, D-Bus name).
+    //   2. Ack timeout (5 s) → addon hung. Force _Exit(0).
+    //   3. Esc / CancelRecording → cancelEscape fires; _Exit immediately.
+    //   4. AsrController cancelled (no commit) → quit() (clean dtors).
+    //   5. Error state → display the error briefly, then _Exit(0). Without
+    //      this the overlay sat in error indefinitely and held the D-Bus
+    //      name, blocking the next F2.
+    //
+    // No idle watchdog. The earlier 3 s timer killed the process before
+    // dbus-daemon could deliver the queued auto-activation method call —
+    // cold startup is ~2.9 s. We accept the small risk that an
+    // accidental introspect or stray method poke leaves a long-lived
+    // idle overlay; in practice nothing on the bus calls our service
+    // except the addon, and the addon only calls during a real F2.
+
+    // Error display + exit. 3 s is enough for the user to read the error
+    // tooltip before the overlay disappears.
+    auto *errorTimer = new QTimer(&app);
+    errorTimer->setSingleShot(true);
+    QObject::connect(errorTimer, &QTimer::timeout, &app, []() {
+        qInfo() << "anytalk-overlay: error display timeout — exiting";
+        ::_Exit(0);
+    });
+    QObject::connect(&asr, &AsrController::stateChanged, errorTimer,
+                     [errorTimer](const QString &s) {
+        if (s == state::Error) errorTimer->start(3000);
+        else errorTimer->stop();
+    });
+
+    auto *ackTimer = new QTimer(&app);
+    ackTimer->setSingleShot(true);
+    QObject::connect(ackTimer, &QTimer::timeout, &app, []() {
+        qWarning() << "anytalk-overlay: Acknowledge timeout — force exit";
+        ::_Exit(0);
+    });
+    QObject::connect(&asr, &AsrController::commitText, ackTimer,
+                     [ackTimer](const QString &) {
+        // 5 s is generous: addon's commitString + busctl call is sub-ms in
+        // practice. Anything longer is the addon being broken; user can
+        // press Esc to bypass. Past that, Force-exit so the next F2 isn't
+        // blocked by a stale bus name.
+        ackTimer->start(5000);
+    });
+    QObject::connect(&service, &OverlayService::ackReceived, &app, []() {
+        QApplication::quit();
+    });
+    QObject::connect(&service, &OverlayService::cancelEscape, &app, []() {
+        // User abort: don't bother with destructors, just go.
+        ::_Exit(0);
+    });
+    QObject::connect(&asr, &AsrController::cancelled, &app, []() {
+        // No commit means addon never gets a CommitText, so it'll never
+        // call Acknowledge. Quit on our own.
+        QApplication::quit();
+    });
 
     return app.exec();
 }
