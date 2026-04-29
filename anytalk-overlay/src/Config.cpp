@@ -63,7 +63,6 @@ OverlayConfig OverlayConfig::load() {
 
     // Legacy flat fields, read first then potentially overwritten by sectioned values.
     QString legacyAppId, legacyToken;
-    bool legacyHasRemoveTrailing = false;
 
     QString currentSection;
     while (!in.atEnd()) {
@@ -84,7 +83,6 @@ OverlayConfig OverlayConfig::load() {
             else if (key == QLatin1String("AccessToken")) legacyToken = val;
             else if (key == QLatin1String("RemoveTrailingPunctuation")) {
                 cfg.removeTrailingPunctuation = toBool(val, false);
-                legacyHasRemoveTrailing = true;
             }
             continue;
         }
@@ -94,7 +92,6 @@ OverlayConfig OverlayConfig::load() {
                 if (!val.isEmpty()) cfg.backend = val;
             } else if (key == QLatin1String("RemoveTrailingPunctuation")) {
                 cfg.removeTrailingPunctuation = toBool(val, false);
-                legacyHasRemoveTrailing = true;
             } else {
                 cfg.backendOptions.insert(joinKey(currentSection, key), val);
             }
@@ -113,7 +110,6 @@ OverlayConfig OverlayConfig::load() {
     };
     fill(QStringLiteral("AppID"), legacyAppId);
     fill(QStringLiteral("AccessToken"), legacyToken);
-    Q_UNUSED(legacyHasRemoveTrailing);
 
     return cfg;
 }

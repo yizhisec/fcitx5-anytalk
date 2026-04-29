@@ -1,6 +1,5 @@
 #include "OverlayService.h"
 #include "AsrController.h"
-#include "OverlayState.h"
 #include "OverlayWindow.h"
 
 #include <QDBusConnection>
@@ -35,20 +34,8 @@ bool OverlayService::registerOnBus() {
     return true;
 }
 
-void OverlayService::Show() {
-    if (window_) window_->onStateChanged(state::Recording);
-}
-
-void OverlayService::Hide() {
-    if (window_) window_->onStateChanged(state::Idle);
-}
-
 void OverlayService::ToggleRecording() {
     if (asr_) asr_->toggleRecording();
-}
-
-void OverlayService::StartRecording() {
-    if (asr_) asr_->startRecording();
 }
 
 void OverlayService::StopRecording() {

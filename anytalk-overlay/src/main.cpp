@@ -24,7 +24,10 @@ namespace {
 bool runSettingsDialog(AsrController &asr) {
     SettingsDialog dlg(OverlayConfig::load());
     if (dlg.exec() != QDialog::Accepted) return false;
-    asr.applyConfig(dlg.config());
+    if (!asr.applyConfig(dlg.config())) {
+        qWarning() << "anytalk-overlay: applyConfig rejected — controller not idle. "
+                      "Saved to file; restart or stop recording first to apply.";
+    }
     return true;
 }
 

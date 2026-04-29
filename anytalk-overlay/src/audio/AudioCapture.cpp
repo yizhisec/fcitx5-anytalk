@@ -69,6 +69,16 @@ void AudioCapture::stop() {
     teardownStream();
 }
 
+// captureLoop runs on a dedicated QThread (created by start()). AudioCapture
+// itself is parented to AsrController on the main thread, so every signal we
+// emit here crosses a thread boundary. Qt's Auto Connection detects
+// QThread::currentThread() != receiver->thread() and queues the call —
+// QByteArray/QString arguments are deep-copied across threads, and slots
+// run on the main event loop where they share a single ordering with all
+// other AsrController state mutations (no lock needed). The matching
+// connect() calls in AsrController::applyConfig pin Qt::QueuedConnection
+// explicitly so the thread contract is visible at the call site, not just
+// implied by AutoConnection.
 void AudioCapture::captureLoop() {
     pa_sample_spec spec{};
     spec.format = PA_SAMPLE_S16LE;

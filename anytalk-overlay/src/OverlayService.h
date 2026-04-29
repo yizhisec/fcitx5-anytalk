@@ -18,7 +18,6 @@ class AsrController;
 ///
 /// Methods:
 ///   ToggleRecording()      idempotent: start if idle, stop if active
-///   StartRecording()       explicit start
 ///   StopRecording()        explicit stop (drain server finals → CommitText)
 ///   CancelRecording()      drop in-flight session, no commit; also serves
 ///                          as the user/addon "exit immediately" escape
@@ -45,10 +44,7 @@ public:
     bool registerOnBus();
 
 public slots:
-    Q_SCRIPTABLE void Show();
-    Q_SCRIPTABLE void Hide();
     Q_SCRIPTABLE void ToggleRecording();
-    Q_SCRIPTABLE void StartRecording();
     Q_SCRIPTABLE void StopRecording();
     Q_SCRIPTABLE void CancelRecording();
     Q_SCRIPTABLE void OpenSettings();

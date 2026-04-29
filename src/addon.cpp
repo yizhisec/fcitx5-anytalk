@@ -1,5 +1,4 @@
 #include "addon.h"
-#include "constants.h"
 
 #include <cstdlib>
 #include <unordered_map>

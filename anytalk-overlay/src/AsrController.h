@@ -1,4 +1,6 @@
 #pragma once
+#include "OverlayState.h"
+
 #include <QObject>
 #include <QString>
 #include <memory>
@@ -67,7 +69,7 @@ private:
     std::unique_ptr<AsrBackend> backend_;
 
     bool removeTrailingPunctuation_ = false;
-    QString currentState_ = QStringLiteral("idle");
+    state::State currentState_ = state::State::Idle;
     QString finalBuffer_;
     qint64 lastLevelEmitMs_ = 0;
     double lastEmittedLevel_ = -1.0;  // sentinel: never matches a [0,1] bucket
