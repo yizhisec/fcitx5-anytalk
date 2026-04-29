@@ -15,11 +15,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#if __has_include(<LayerShellQt/Shell>)
-#  include <LayerShellQt/Shell>
-#  define ANYTALK_HAS_LAYER_SHELL 1
-#endif
-
 namespace {
 
 /// Show the SettingsDialog and, on Save, push the new config into the
@@ -72,11 +67,12 @@ void installCleanShutdownHandlers(QApplication &app) {
 } // namespace
 
 int main(int argc, char **argv) {
-#ifdef ANYTALK_HAS_LAYER_SHELL
-    if (qgetenv("XDG_SESSION_TYPE") == "wayland") {
-        LayerShellQt::Shell::useLayerShell();
-    }
-#endif
+    // Note: pre-Qt-6.5 used to require LayerShellQt::Shell::useLayerShell()
+    // here to make Wayland windows layer-shell surfaces, but that flipped
+    // EVERY Qt window — including SettingsDialog, which then displayed as
+    // a fullscreen layer instead of a draggable dialog. Qt 6.5+ supports
+    // per-window opt-in via LayerShellQt::Window::get(), which OverlayWindow
+    // does in configureLayerShell(); the dialog stays a regular xdg-toplevel.
 
     QApplication app(argc, argv);
     app.setApplicationName("anytalk-overlay");
