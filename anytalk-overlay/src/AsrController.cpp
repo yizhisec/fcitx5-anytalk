@@ -131,6 +131,22 @@ void AsrController::onAudioLevel(double level) {
 }
 
 void AsrController::onAudioError(const QString &msg) {
+    // Mic died mid-session (bluetooth headset out of battery, USB unplug,
+    // PulseAudio source recycle, etc.). If the user already had a Recording
+    // session going, keep whatever was recognized and ask the backend to
+    // drain — the server already has the audio it needs for a final pass,
+    // and committing partial text is strictly better than dropping it on
+    // the floor. The backend's stop() sends a LAST frame; onBackendFinished
+    // will flush finalBuffer_ via the normal commitText path.
+    if (backend_ && currentState_ == state::Recording) {
+        backend_->stop();
+        // currentState_ stays Recording until onBackendFinished — same as a
+        // user-initiated F2 stop. We surface the error to the UI but don't
+        // tear the session down.
+        emit errorOccurred(msg);
+        return;
+    }
+    // Connecting / Idle / Error: nothing recognized yet, abandon.
     finalBuffer_.clear();
     if (backend_) backend_->cancel();
     emit errorOccurred(msg);
