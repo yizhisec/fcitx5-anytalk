@@ -11,7 +11,23 @@ AudioCapture::~AudioCapture() {
     running_.store(false, std::memory_order_release);
     active_.store(false, std::memory_order_release);
     if (thread_) {
-        thread_->wait();
+        // Cap how long we wait for the capture thread to drop out of
+        // pa_simple_read. PulseAudio / bluetooth daemons occasionally hang
+        // (BT profile renegotiation, source disappearing) and a blind
+        // wait() pins the entire overlay process during shutdown — that
+        // in turn keeps the D-Bus name owned, so the next F2 thinks
+        // overlay is still up and won't activate a fresh one. Better to
+        // leak the thread + pa_simple_t and let the kernel clean up at
+        // exit() than to deadlock here.
+        constexpr unsigned long kShutdownTimeoutMs = 2000;
+        if (!thread_->wait(kShutdownTimeoutMs)) {
+            qWarning() << "AudioCapture: capture thread did not exit in"
+                       << kShutdownTimeoutMs << "ms (PA likely stuck);"
+                       << "skipping cleanup, kernel will reclaim at exit";
+            thread_ = nullptr;
+            pa_ = nullptr;
+            return;
+        }
         thread_->deleteLater();
         thread_ = nullptr;
     }
