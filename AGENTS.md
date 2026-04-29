@@ -44,6 +44,7 @@
 - The legacy `org.fcitx.Fcitx5.AnyTalk` `StateChanged` D-Bus signal is preserved for waybar custom-module integrations.
 - F2/Esc/Enter are watched via `InputContextKeyEvent` — they only fire when a focused app exposes an InputContext. Empty workspaces / desktop-with-no-window will not trigger the addon. For full coverage, bind the keys at compositor level to `busctl --user call ... ToggleRecording` (see README).
 - Overlay lifecycle is owned by the addon. `wakeOverlay()` in the addon constructor sends a `Ping` to trigger D-Bus auto-activation at fcitx5 load / `fcitx5 -r`. F2/Esc go through `overlayCall()` which gates on `bus->serviceOwner(...).empty()` — so `pkill -x anytalk-overlay` is *final* until the next `fcitx5 -r`. This is intentional: re-spawning into a half-released kernel BT SCO state was the freeze.
+- `[Audio] CaptureMode = auto | always-on | on-demand` controls mic lifecycle. `auto` (default) probes the default PA source at `applyConfig` and picks on-demand for Bluetooth, always-on otherwise. Probe failure → on-demand (safe). Override via SettingsDialog "麦克风模式" combobox.
 
 ## Wayland & Multi-monitor Notes
 - LayerShellQt: not calling `setScreen()` does **not** mean "compositor decides". It falls back to `QWindow::screen()` (i.e. primary). To follow the active output use `ls->setWantsToBeOnActiveScreen(true)` (LayerShellQt ≥ 6.6).
@@ -51,6 +52,7 @@
 - `KeyboardInteractivity` MUST be `None` for this overlay. `OnDemand` + destroy/recreate has wedged sway seat state in the past.
 - fcitx5 `InputContext::cursorRect()` is **surface-local** on Wayland (text-input-v3 spec). Don't use it to find the active screen on Wayland; rely on `setWantsToBeOnActiveScreen` instead. On X11 the rect is screen-absolute so `QCursor::pos()` works for the X11 path.
 - SIGTERM handler in `main.cpp` calls `::_Exit(0)`, not `QApplication::quit()` — Qt's destructor chain can deadlock on a stuck `pa_simple_read`, leaving the PA stream open and the mic locked. Kernel-level fd close is the only reliable cleanup.
+- LayerShellQt: do NOT call `LayerShellQt::Shell::useLayerShell()` globally — it flips EVERY Qt window in the process to a layer-shell surface, including QDialogs (SettingsDialog rendered fullscreen because of this). Qt 6.5+ uses per-window opt-in via `LayerShellQt::Window::get(handle)`, which OverlayWindow already does in `configureLayerShell()`.
 
 ## Volcengine ASR Protocol Notes
 - One ws = one session: server kicks idle ws within seconds; can't reuse across F2 presses.
@@ -60,7 +62,10 @@
 
 ## PulseAudio Capture Notes
 - PA suspends idle sources after a few seconds; next stream open ships ~1s of *absolute zero* PCM padding (rms == 0, not even noise floor).
-- `AudioCapture` keeps the PA stream open and the read thread running for the lifetime of the overlay so the source never suspends; `start()/stop()` only flip an `active_` flag controlling whether reads are emitted.
+- `AudioCapture` runs in one of two modes: **always-on** (PA stream + read thread persist for lifetime; `start()/stop()` flip an `active_` flag) or **on-demand** (`stop()` actually frees the stream so the kernel releases the source — required for BT). Mode is set per applyConfig via `setOnDemand()`; see `AsrController::applyConfig` and `[Audio] CaptureMode`.
+- BT-mic detection signals (any one is enough): `device.api` contains "bluez" (PipeWire reports `bluez5`, raw BlueZ reports `bluez` — substring match), or `device.bus == "bluetooth"`, or source name starts with `bluez_`. See `audio/PulseSourceProbe.cpp::isBluetooth()`.
+- `libpulse-simple` cannot query proplist — for source metadata use the async API (`pa_threaded_mainloop` + `pa_context`). Both libraries are linked.
+- `pa_threaded_mainloop_wait` has no built-in timeout. Bounded waits need a one-shot `pa_mainloop_api::time_new` event that signals the loop on expiry; unlock/sleep/lock loops silently lose `pa_threaded_mainloop_signal` callbacks.
 - PA may recycle long-lived streams behind us; `pa_simple_read` failure puts the thread into a dead state — next `start()` detects and rebuilds.
 - The PA client identity is the overlay process, **not** the focused application. Switching applications does not affect our capture path.
 - **Bluetooth mic warning**: HFP/SCO + always-on capture pattern hits a known kernel race (CVE-2025-40309 / CVE-2026-31408 family) — closing a long-running SCO stream can wedge the system requiring hard reboot. Symptom: `Bluetooth: hci0: corrupted SCO packet` in dmesg right before freeze. For dev work use built-in/wired mic; the BT mic path is unsafe in current kernels.
@@ -71,3 +76,4 @@
 - Watch overlay D-Bus signals live: `busctl --user monitor org.fcitx.Fcitx5.AnyTalk.Overlay`.
 - Stale install residue lives in `/usr/local/share/fcitx5/` from prior CMake default-prefix builds — check there if fcitx5 sees a phantom addon name.
 - Hard freezes during `pkill anytalk-overlay`: check `sudo journalctl --boot=-1 --dmesg | grep -i sco` for `corrupted SCO packet` — that's the BT SCO race fingerprint.
+- Empty object files in `.git/objects/` after a hard reboot (BT SCO freeze fingerprint): `find .git/objects -type f -size 0` to enumerate, delete them, then `git fetch --refetch origin` (NOT plain `git fetch` — that won't redownload reachable objects whose ref already exists locally). `git fsck --full` confirms. Always `cp -a .git .git.bak.*` first.
