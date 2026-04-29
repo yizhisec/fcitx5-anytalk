@@ -28,4 +28,5 @@ private:
     QLineEdit *appIdEdit_ = nullptr;
     QLineEdit *tokenEdit_ = nullptr;
     QCheckBox *trimCheck_ = nullptr;
+    QComboBox *captureModeCombo_ = nullptr;
 };

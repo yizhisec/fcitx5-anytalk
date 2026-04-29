@@ -8,24 +8,33 @@
 AudioCapture::AudioCapture(QObject *parent) : QObject(parent) {}
 
 AudioCapture::~AudioCapture() {
-    running_.store(false, std::memory_order_release);
     active_.store(false, std::memory_order_release);
+    teardownStream();
+}
+
+void AudioCapture::setOnDemand(bool onDemand) {
+    onDemand_.store(onDemand, std::memory_order_release);
+}
+
+void AudioCapture::teardownStream() {
+    running_.store(false, std::memory_order_release);
     if (thread_) {
         // Cap how long we wait for the capture thread to drop out of
         // pa_simple_read. PulseAudio / bluetooth daemons occasionally hang
         // (BT profile renegotiation, source disappearing) and a blind
-        // wait() pins the entire overlay process during shutdown — that
-        // in turn keeps the D-Bus name owned, so the next F2 thinks
-        // overlay is still up and won't activate a fresh one. Better to
-        // leak the thread + pa_simple_t and let the kernel clean up at
-        // exit() than to deadlock here.
+        // wait() pins the entire overlay process — that in turn keeps the
+        // D-Bus name owned, so the next F2 thinks overlay is still up and
+        // won't activate a fresh one. Better to leak the thread +
+        // pa_simple_t and let the kernel clean up at exit() than to
+        // deadlock here.
         constexpr unsigned long kShutdownTimeoutMs = 2000;
         if (!thread_->wait(kShutdownTimeoutMs)) {
             qWarning() << "AudioCapture: capture thread did not exit in"
                        << kShutdownTimeoutMs << "ms (PA likely stuck);"
-                       << "skipping cleanup, kernel will reclaim at exit";
+                       << "leaking thread, kernel will reclaim at exit";
             thread_ = nullptr;
             pa_ = nullptr;
+            warmedUp_.store(false, std::memory_order_release);
             return;
         }
         thread_->deleteLater();
@@ -35,22 +44,16 @@ AudioCapture::~AudioCapture() {
         pa_simple_free(static_cast<pa_simple *>(pa_));
         pa_ = nullptr;
     }
+    warmedUp_.store(false, std::memory_order_release);
 }
 
 bool AudioCapture::prewarm() {
     if (pa_ && running_.load(std::memory_order_acquire)) return true;
 
-    // Clean up after a dead thread (read failed in captureLoop).
-    if (thread_) {
-        thread_->wait();
-        thread_->deleteLater();
-        thread_ = nullptr;
-    }
-    if (pa_) {
-        pa_simple_free(static_cast<pa_simple *>(pa_));
-        pa_ = nullptr;
-    }
-    warmedUp_.store(false, std::memory_order_release);
+    // Clean up after a dead thread (read failed in captureLoop) or a
+    // previous on-demand stop(). teardownStream() handles the bounded
+    // wait + leak fallback if PA wedged.
+    teardownStream();
 
     pa_sample_spec spec{};
     spec.format = PA_SAMPLE_S16LE;
@@ -91,11 +94,20 @@ bool AudioCapture::start() {
 }
 
 void AudioCapture::stop() {
-    // Keep the PA stream open and the thread reading (discarding output) so
-    // the source doesn't suspend — that suspend ramp-up costs ~1s of zero
-    // padding on the next start() and is the single biggest hit to
-    // first-press responsiveness when switching applications.
     active_.store(false, std::memory_order_release);
+    if (!onDemand_.load(std::memory_order_acquire)) {
+        // Always-on path: keep the PA stream open and the thread reading
+        // (discarding output) so the source doesn't suspend — that
+        // suspend ramp-up costs ~1 s of zero padding on the next start()
+        // and is the single biggest hit to first-press responsiveness
+        // when switching applications. Safe for ALSA / USB mics.
+        return;
+    }
+    // On-demand path: actually release the stream so the kernel can drop
+    // the source (and any Bluetooth HFP/SCO link). Trades 1 s of
+    // first-press silence for not pinning a SCO link the user might
+    // need to release safely. See CLAUDE.md "Bluetooth mic warning".
+    teardownStream();
 }
 
 void AudioCapture::captureLoop() {

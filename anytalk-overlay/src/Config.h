@@ -22,10 +22,20 @@
 ///   AppID                = ...
 ///   AccessToken          = ...
 ///   RemoveTrailingPunctuation = false
+
+/// Microphone capture lifecycle policy. See AudioCapture and
+/// PulseSourceProbe for the rationale.
+enum class CaptureMode {
+    Auto,       // probe default source; on-demand for BT, always-on otherwise
+    AlwaysOn,   // force always-on (best responsiveness; unsafe for BT mic)
+    OnDemand,   // force on-demand (always-safe; ~1 s first-press silence)
+};
+
 struct OverlayConfig {
     // Cross-backend
     QString backend = QStringLiteral("volcengine");
     bool removeTrailingPunctuation = false;
+    CaptureMode captureMode = CaptureMode::Auto;
 
     // Per-backend bag — each backend pulls the keys it needs.
     // Stored flat as "Section/Key" → string.

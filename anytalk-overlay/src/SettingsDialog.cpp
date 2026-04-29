@@ -17,7 +17,14 @@ constexpr const char *kVolcengine = "volcengine";
 SettingsDialog::SettingsDialog(OverlayConfig cfg, QWidget *parent)
     : QDialog(parent), cfg_(std::move(cfg)) {
     setWindowTitle(QStringLiteral("AnyTalk 配置"));
+    // Force a normal centered dialog look. Without these the compositor
+    // (sway/Hyprland) sometimes opens the dialog tiled or full-bleed
+    // because no parent window exists in the --settings CLI path.
+    setWindowFlag(Qt::Dialog, true);
+    setWindowModality(Qt::ApplicationModal);
+    setSizeGripEnabled(false);
     setMinimumWidth(420);
+    setMaximumWidth(640);
 
     auto *root = new QVBoxLayout(this);
 
@@ -54,6 +61,19 @@ SettingsDialog::SettingsDialog(OverlayConfig cfg, QWidget *parent)
     trimCheck_->setChecked(cfg_.removeTrailingPunctuation);
     form->addRow(QString(), trimCheck_);
 
+    captureModeCombo_ = new QComboBox(this);
+    captureModeCombo_->addItem(QStringLiteral("自动 (蓝牙按需 / 其它常驻)"),
+                               static_cast<int>(CaptureMode::Auto));
+    captureModeCombo_->addItem(QStringLiteral("常驻 (响应快, 蓝牙不安全)"),
+                               static_cast<int>(CaptureMode::AlwaysOn));
+    captureModeCombo_->addItem(QStringLiteral("按需 (首次 ~1s 静音, 安全)"),
+                               static_cast<int>(CaptureMode::OnDemand));
+    {
+        const int cmIdx = captureModeCombo_->findData(static_cast<int>(cfg_.captureMode));
+        captureModeCombo_->setCurrentIndex(cmIdx >= 0 ? cmIdx : 0);
+    }
+    form->addRow(QStringLiteral("麦克风模式"), captureModeCombo_);
+
     root->addLayout(form);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
@@ -65,6 +85,7 @@ SettingsDialog::SettingsDialog(OverlayConfig cfg, QWidget *parent)
 void SettingsDialog::onAccept() {
     cfg_.backend = backendCombo_->currentData().toString();
     cfg_.removeTrailingPunctuation = trimCheck_->isChecked();
+    cfg_.captureMode = static_cast<CaptureMode>(captureModeCombo_->currentData().toInt());
     cfg_.backendOptions.insert(QStringLiteral("Volcengine/AppID"), appIdEdit_->text().trimmed());
     cfg_.backendOptions.insert(QStringLiteral("Volcengine/AccessToken"), tokenEdit_->text().trimmed());
 

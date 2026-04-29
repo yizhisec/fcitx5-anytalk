@@ -12,6 +12,9 @@ find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets DBus Concurrent WebSoc
 find_package(LayerShellQt QUIET)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PULSE_SIMPLE REQUIRED IMPORTED_TARGET libpulse-simple)
+# libpulse (async API) is needed for PulseSourceProbe — pa_threaded_mainloop /
+# pa_context — to detect Bluetooth default sources before opening the capture stream.
+pkg_check_modules(PULSE REQUIRED IMPORTED_TARGET libpulse)
 
 add_executable(anytalk-overlay
     src/main.cpp
@@ -32,6 +35,8 @@ add_executable(anytalk-overlay
     src/StatusDot.cpp
     src/audio/AudioCapture.h
     src/audio/AudioCapture.cpp
+    src/audio/PulseSourceProbe.h
+    src/audio/PulseSourceProbe.cpp
     src/asr/AsrBackend.h
     src/asr/AsrBackendFactory.h
     src/asr/AsrBackendFactory.cpp
@@ -51,6 +56,7 @@ target_link_libraries(anytalk-overlay PRIVATE
     Qt6::Concurrent
     Qt6::WebSockets
     PkgConfig::PULSE_SIMPLE
+    PkgConfig::PULSE
 )
 
 if(LayerShellQt_FOUND)

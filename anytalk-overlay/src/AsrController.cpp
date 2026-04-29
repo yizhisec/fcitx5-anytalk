@@ -4,6 +4,7 @@
 #include "asr/AsrBackend.h"
 #include "asr/AsrBackendFactory.h"
 #include "audio/AudioCapture.h"
+#include "audio/PulseSourceProbe.h"
 
 #include <QDateTime>
 #include <QDebug>
@@ -32,9 +33,43 @@ bool AsrController::applyConfig(const OverlayConfig &cfg) {
                 &AsrController::onAudioWarmedUp);
     }
 
-    // Pre-warm the mic stream so the first F2 doesn't pay for stream creation
-    // and PulseAudio's source-suspend silence padding.
-    audio_->prewarm();
+    // Pick capture mode. Auto = probe default PA source; on-demand for
+    // Bluetooth (HFP/SCO unsafe under always-on, see CLAUDE.md), always-on
+    // otherwise. Probe failure is treated as "unknown — assume risky" and
+    // also flips us to on-demand. User can override via [Audio] CaptureMode.
+    bool onDemand = false;
+    QString modeReason;
+    switch (cfg.captureMode) {
+        case CaptureMode::AlwaysOn:
+            onDemand = false;
+            modeReason = QStringLiteral("forced always-on by config");
+            break;
+        case CaptureMode::OnDemand:
+            onDemand = true;
+            modeReason = QStringLiteral("forced on-demand by config");
+            break;
+        case CaptureMode::Auto: {
+            const auto info = anytalk::probeDefaultSource();
+            if (!info) {
+                onDemand = true;
+                modeReason = QStringLiteral("probe failed; defaulting to on-demand");
+            } else if (info->isBluetooth()) {
+                onDemand = true;
+                modeReason = QStringLiteral("Bluetooth source detected (%1)").arg(info->name);
+            } else {
+                onDemand = false;
+                modeReason = QStringLiteral("non-BT source (%1)").arg(info->name);
+            }
+            break;
+        }
+    }
+    audio_->setOnDemand(onDemand);
+    qInfo().noquote() << "AsrController: capture mode ="
+                      << (onDemand ? "on-demand" : "always-on") << "—" << modeReason;
+
+    // Pre-warm only in always-on mode. On-demand pays the stream-open cost
+    // on the first F2 by design — that's the whole point.
+    if (!onDemand) audio_->prewarm();
     return true;
 }
 
