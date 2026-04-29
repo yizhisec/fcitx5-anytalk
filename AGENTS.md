@@ -14,6 +14,7 @@
 - `cmake -S . -B build`: configure.
 - `cmake --build build`: build addon + overlay.
 - `sudo cmake --install build`: install both.
+- **Force-copy after build** if `cmake --install` reports "Up-to-date" but binary is stale: `sudo cp -f build/anytalk-overlay/anytalk-overlay /usr/bin/anytalk-overlay`.
 - `pkill -x anytalk-overlay`: drop the running overlay so the next F2 picks up the new binary (D-Bus activation re-spawns it).
 - `fcitx5 -r`: reload the addon side after `anytalk.so` changes.
 - `anytalk-overlay --settings`: open the settings dialog from the command line.
@@ -40,6 +41,14 @@
 - `anytalk-addon.conf` ships with `Configurable=False`; fcitx5-config-qt does not expose a settings page.
 - D-Bus session-bus activation auto-launches the overlay on first method call. To make activation work on Sway / wlroots, the addon pushes WAYLAND_DISPLAY etc. into the bus daemon at load time via `UpdateActivationEnvironment`.
 - The legacy `org.fcitx.Fcitx5.AnyTalk` `StateChanged` D-Bus signal is preserved for waybar custom-module integrations.
+- F2/Esc/Enter are watched via `InputContextKeyEvent` — they only fire when a focused app exposes an InputContext. Empty workspaces / desktop-with-no-window will not trigger the addon. For full coverage, bind the keys at compositor level to `busctl --user call ... ToggleRecording` (see README).
+
+## Wayland & Multi-monitor Notes
+- LayerShellQt: not calling `setScreen()` does **not** mean "compositor decides". It falls back to `QWindow::screen()` (i.e. primary). To follow the active output use `ls->setWantsToBeOnActiveScreen(true)` (LayerShellQt ≥ 6.6).
+- `setScreen()` only takes effect on first surface creation; to switch output across F2 presses, do `windowHandle()->destroy()` before the next `show()`.
+- `KeyboardInteractivity` MUST be `None` for this overlay. `OnDemand` + destroy/recreate has wedged sway seat state in the past.
+- fcitx5 `InputContext::cursorRect()` is **surface-local** on Wayland (text-input-v3 spec). Don't use it to find the active screen on Wayland; rely on `setWantsToBeOnActiveScreen` instead. On X11 the rect is screen-absolute so `QCursor::pos()` works for the X11 path.
+- SIGTERM handler in `main.cpp` calls `::_Exit(0)`, not `QApplication::quit()` — Qt's destructor chain can deadlock on a stuck `pa_simple_read`, leaving the PA stream open and the mic locked. Kernel-level fd close is the only reliable cleanup.
 
 ## Volcengine ASR Protocol Notes
 - One ws = one session: server kicks idle ws within seconds; can't reuse across F2 presses.
@@ -52,9 +61,11 @@
 - `AudioCapture` keeps the PA stream open and the read thread running for the lifetime of the overlay so the source never suspends; `start()/stop()` only flip an `active_` flag controlling whether reads are emitted.
 - PA may recycle long-lived streams behind us; `pa_simple_read` failure puts the thread into a dead state — next `start()` detects and rebuilds.
 - The PA client identity is the overlay process, **not** the focused application. Switching applications does not affect our capture path.
+- **Bluetooth mic warning**: HFP/SCO + always-on capture pattern hits a known kernel race (CVE-2025-40309 / CVE-2026-31408 family) — closing a long-running SCO stream can wedge the system requiring hard reboot. Symptom: `Bluetooth: hci0: corrupted SCO packet` in dmesg right before freeze. For dev work use built-in/wired mic; the BT mic path is unsafe in current kernels.
 
 ## Debug Recipes
 - Coredump backtrace: `coredumpctl info fcitx5` for stack; `coredumpctl debug PID --debugger-arguments="-batch -x cmds.txt"` for scripted gdb (registers, disasm).
 - Resolve a libFcitx5Core offset: `nm -D /usr/lib/libFcitx5Core.so.7 | sort` + `objdump -d --start-address=X --stop-address=Y -C lib.so` for the crash site.
 - Watch overlay D-Bus signals live: `busctl --user monitor org.fcitx.Fcitx5.AnyTalk.Overlay`.
 - Stale install residue lives in `/usr/local/share/fcitx5/` from prior CMake default-prefix builds — check there if fcitx5 sees a phantom addon name.
+- Hard freezes during `pkill anytalk-overlay`: check `sudo journalctl --boot=-1 --dmesg | grep -i sco` for `corrupted SCO packet` — that's the BT SCO race fingerprint.

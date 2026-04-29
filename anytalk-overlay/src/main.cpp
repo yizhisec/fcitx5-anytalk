@@ -8,6 +8,12 @@
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QDebug>
+#include <QSocketNotifier>
+
+#include <csignal>
+#include <cstdlib>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #if __has_include(<LayerShellQt/Shell>)
 #  include <LayerShellQt/Shell>
@@ -26,6 +32,43 @@ bool runSettingsDialog(AsrController &asr) {
     return true;
 }
 
+// Self-pipe for SIGTERM/SIGINT handling. The async signal handler only
+// writes a byte; the QSocketNotifier callback runs on the main thread and
+// terminates the process via _Exit().
+//
+// Why _Exit instead of QApplication::quit():
+//   The capture thread sits inside a blocking pa_simple_read. If
+//   PulseAudio / the BT stack is mid-renegotiation, the read won't return,
+//   and Qt's destructor chain (~AudioCapture) ends up timing out and
+//   leaking the thread + pa_simple_t. The process stays alive holding the
+//   PA stream, which keeps the microphone (and BT profile) locked. Next
+//   D-Bus activation spawns a fresh overlay that races on the same device
+//   → BT stack wedges the seat.
+//
+//   _Exit skips all destructors. The kernel closes our PA socket on its
+//   own, which makes the PA daemon see EOF and release the stream cleanly
+//   in microseconds. Layer-shell surface, D-Bus name, and capture thread
+//   are all torn down by the kernel — no cleanup races.
+int sigPipe[2] = {-1, -1};
+
+void signalHandler(int) {
+    const char one = 1;
+    [[maybe_unused]] auto _ = ::write(sigPipe[1], &one, 1);
+}
+
+void installCleanShutdownHandlers(QApplication &app) {
+    if (::pipe(sigPipe) != 0) return;
+    auto *notifier = new QSocketNotifier(sigPipe[0], QSocketNotifier::Read, &app);
+    QObject::connect(notifier, &QSocketNotifier::activated, &app, []() {
+        char buf;
+        [[maybe_unused]] auto _ = ::read(sigPipe[0], &buf, 1);
+        ::_Exit(0);
+    });
+    std::signal(SIGTERM, signalHandler);
+    std::signal(SIGINT, signalHandler);
+    std::signal(SIGHUP, signalHandler);
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -39,6 +82,7 @@ int main(int argc, char **argv) {
     app.setApplicationName("anytalk-overlay");
     app.setApplicationVersion("0.5.1");
     app.setQuitOnLastWindowClosed(false);
+    installCleanShutdownHandlers(app);
 
     QCommandLineParser parser;
     parser.setApplicationDescription("Aurora-style voice activation overlay for fcitx5-anytalk");

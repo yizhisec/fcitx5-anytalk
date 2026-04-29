@@ -42,6 +42,33 @@ exec dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DE
 
 KDE / GNOME 自动处理，无需此步。
 
+### 在空 workspace / 桌面无焦点时也能 F2
+
+fcitx5 的按键事件依赖输入法上下文（InputContext）——焦点在某个应用的输入框时才触发。
+若你需要在空 workspace 或纯桌面下也按 F2 唤起，需要在合成器层绑定 D-Bus 调用：
+
+**Sway** (`~/.config/sway/config`)：
+
+```
+bindsym F2 exec busctl --user call \
+    org.fcitx.Fcitx5.AnyTalk.Overlay /overlay \
+    org.fcitx.Fcitx5.AnyTalk.Overlay ToggleRecording
+```
+
+**Hyprland** (`~/.config/hypr/hyprland.conf`)：
+
+```
+bind = , F2, exec, busctl --user call org.fcitx.Fcitx5.AnyTalk.Overlay /overlay org.fcitx.Fcitx5.AnyTalk.Overlay ToggleRecording
+```
+
+**i3**：
+
+```
+bindsym F2 exec --no-startup-id busctl --user call org.fcitx.Fcitx5.AnyTalk.Overlay /overlay org.fcitx.Fcitx5.AnyTalk.Overlay ToggleRecording
+```
+
+合成器层绑定后会**先于**应用消费 F2，等同于 fcitx5 那条路——但能覆盖空焦点场景。同理 `StopRecording` / `CancelRecording` 也可以绑到 Enter / Esc。
+
 ## 使用
 
 ```

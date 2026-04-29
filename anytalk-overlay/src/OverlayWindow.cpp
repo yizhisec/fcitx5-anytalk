@@ -19,15 +19,8 @@
 #include <QScreen>
 #include <QShowEvent>
 #include <QVBoxLayout>
+#include <QWindow>
 
-namespace {
-/// Resolve the screen the user is currently on (cursor location). Falls
-/// back to primary if the cursor isn't over any screen (rare).
-QScreen *currentScreen() {
-    if (auto *s = QGuiApplication::screenAt(QCursor::pos())) return s;
-    return QGuiApplication::primaryScreen();
-}
-} // namespace
 
 #if __has_include(<LayerShellQt/Window>)
 #  include <LayerShellQt/Window>
@@ -210,7 +203,10 @@ void OverlayWindow::onTranscriptFinal(const QString &text) {
 // ---------- Window plumbing ----------
 
 void OverlayWindow::positionAtBottom() {
-    auto *screen = currentScreen();
+    // X11 path only — Wayland goes through configureLayerShell. On X11,
+    // QCursor::pos() is the global cursor and identifies the active screen.
+    auto *screen = QGuiApplication::screenAt(QCursor::pos());
+    if (!screen) screen = QGuiApplication::primaryScreen();
     if (!screen) return;
     const QRect avail = screen->availableGeometry();
     // Recompute transcript wrap width as 2/3 of the active screen and re-fit.
@@ -233,20 +229,33 @@ void OverlayWindow::configureLayerShell() {
     auto *ls = LayerShellQt::Window::get(handle);
     if (!ls) return;
 
-    auto *screen = currentScreen();
-
     ls->setLayer(LayerShellQt::Window::LayerOverlay);
     ls->setAnchors(LayerShellQt::Window::AnchorBottom);
     ls->setMargins(QMargins(0, 0, 0, Theme::CARD_BOTTOM_MARGIN));
-    ls->setKeyboardInteractivity(LayerShellQt::Window::KeyboardInteractivityOnDemand);
+    // No keyboard grab. All hotkeys (F2 / Esc / Enter) are intercepted by
+    // the fcitx5 addon at PreInputMethod phase before they reach any app.
+    // Grabbing here added zero value but risked wedging sway's seat state
+    // when the surface was destroyed/recreated for output switching.
+    ls->setKeyboardInteractivity(LayerShellQt::Window::KeyboardInteractivityNone);
     ls->setExclusiveZone(0);
     ls->setScope(QStringLiteral("anytalk-overlay"));
-    if (screen) ls->setScreen(screen);
+    // Tell the compositor to pick the currently active output. Per
+    // LayerShellQt header docs (window.h): screen()==null AND
+    // wantsToBeOnActiveScreen()==false would fall back to QWindow::screen()
+    // (i.e. primary), which is exactly what we *don't* want. Setting
+    // wantsToBeOnActiveScreen(true) makes the wrapper pass NULL as the
+    // wl_layer_shell output, which the protocol defines as "compositor
+    // chooses the currently active output" — same effect as fuzzel,
+    // tofi, wob, rofi-wayland and other Wayland-native popups.
+    ls->setWantsToBeOnActiveScreen(true);
 
-    // Constrain transcript wrap width to 2/3 of the *active* screen.
-    if (screen) {
+    // Wrap width sizing: we don't know which output we'll land on yet, so
+    // use the primary screen as a sane upper bound. After enter() fires
+    // we could re-fit, but in practice screens within one setup are
+    // usually similar enough that this approximation is fine.
+    if (auto *primary = QGuiApplication::primaryScreen()) {
         const int wrap = std::max(Theme::TRANSCRIPT_MIN_WIDTH,
-                                   static_cast<int>(screen->geometry().width() *
+                                   static_cast<int>(primary->geometry().width() *
                                                     Theme::TRANSCRIPT_WIDTH_FRACTION));
         transcriptLabel_->setMaximumWidth(wrap);
         setMaximumWidth(wrap + Theme::CARD_PAD_X * 2);
@@ -266,6 +275,11 @@ void OverlayWindow::showEvent(QShowEvent *event) {
 
 void OverlayWindow::fadeIn() {
     if (!isVisible()) {
+        // Force the layer-shell surface to be re-created so the compositor
+        // re-picks the current output. Without this, the surface stays
+        // pinned to whichever output it bound to on first show — the
+        // overlay process is D-Bus activated and lives indefinitely.
+        if (auto *h = windowHandle()) h->destroy();
         fadeEffect_->setOpacity(0.0);
         show();
     }
@@ -311,3 +325,4 @@ void OverlayWindow::paintEvent(QPaintEvent *) {
     p.setBrush(Qt::NoBrush);
     p.drawPath(path);
 }
+
