@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(fcitx5-anytalk VERSION 0.5.1)
+project(fcitx5-anytalk VERSION 0.5.2)
 
 include(GNUInstallDirs)
 

@@ -80,7 +80,7 @@ int main(int argc, char **argv) {
 
     QApplication app(argc, argv);
     app.setApplicationName("anytalk-overlay");
-    app.setApplicationVersion("0.5.1");
+    app.setApplicationVersion("0.5.2");
     app.setQuitOnLastWindowClosed(false);
     installCleanShutdownHandlers(app);
 
