@@ -27,6 +27,7 @@ private:
     QComboBox *backendCombo_ = nullptr;
     QLineEdit *appIdEdit_ = nullptr;
     QLineEdit *tokenEdit_ = nullptr;
+    QComboBox *volcModeCombo_ = nullptr;
     QCheckBox *trimCheck_ = nullptr;
     QComboBox *captureModeCombo_ = nullptr;
 };

@@ -82,7 +82,8 @@ void VolcengineBackend::onWsConnected() {
     if (state_ != State::Connecting) return;
     emit connected();
     state_ = State::Recording;
-    const auto initial = volcengine::buildInitialRequestJson(settings_.mode);
+    const auto initial = volcengine::buildInitialRequestJson(settings_.mode,
+                                                              settings_.enableNonstream);
     ws_->sendBinaryMessage(volcengine::buildFullClientRequest(initial, nextSeq_++));
     // Flush handshake-buffered audio in 200ms slices — Doubao silently
     // drops audio_only frames much larger than that.

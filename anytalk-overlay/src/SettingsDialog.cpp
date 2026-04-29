@@ -57,6 +57,34 @@ SettingsDialog::SettingsDialog(OverlayConfig cfg, QWidget *parent)
     tokenEdit_->setEchoMode(QLineEdit::PasswordEchoOnEdit);
     form->addRow(QStringLiteral("Access Token"), tokenEdit_);
 
+    // Combo data is a synthetic key combining mode + two-pass; onAccept
+    // splits it back into the two conf fields (Volcengine/Mode and
+    // Volcengine/EnableNonstream). Keeping it as one picker is clearer
+    // for users than mode + a separate "enable two-pass" checkbox whose
+    // state is meaningless when mode != bidi.
+    volcModeCombo_ = new QComboBox(this);
+    volcModeCombo_->addItem(QStringLiteral("双向流式 + 二遍识别 — 又快又准 ★ 推荐"),
+                             QStringLiteral("bidi_2pass"));
+    volcModeCombo_->addItem(QStringLiteral("双向异步流式 — 实时"),
+                             QStringLiteral("bidi_async"));
+    volcModeCombo_->addItem(QStringLiteral("双向流式 — 最快"),
+                             QStringLiteral("bidi"));
+    volcModeCombo_->addItem(QStringLiteral("流式输入 — 仅出最终结果, 最准"),
+                             QStringLiteral("nostream"));
+    {
+        const QString rawMode = cfg_.str(QStringLiteral("Volcengine"),
+                                          QStringLiteral("Mode"),
+                                          QStringLiteral("bidi_async"));
+        const bool nonstream = cfg_.boolean(QStringLiteral("Volcengine"),
+                                             QStringLiteral("EnableNonstream"), false);
+        const QString cur = (rawMode == QLatin1String("bidi") && nonstream)
+                                ? QStringLiteral("bidi_2pass")
+                                : rawMode;
+        const int vmIdx = volcModeCombo_->findData(cur);
+        volcModeCombo_->setCurrentIndex(vmIdx >= 0 ? vmIdx : 0);
+    }
+    form->addRow(QStringLiteral("识别模式"), volcModeCombo_);
+
     trimCheck_ = new QCheckBox(QStringLiteral("自动去除句末标点"), this);
     trimCheck_->setChecked(cfg_.removeTrailingPunctuation);
     form->addRow(QString(), trimCheck_);
@@ -88,6 +116,14 @@ void SettingsDialog::onAccept() {
     cfg_.captureMode = static_cast<CaptureMode>(captureModeCombo_->currentData().toInt());
     cfg_.backendOptions.insert(QStringLiteral("Volcengine/AppID"), appIdEdit_->text().trimmed());
     cfg_.backendOptions.insert(QStringLiteral("Volcengine/AccessToken"), tokenEdit_->text().trimmed());
+    {
+        const QString picked = volcModeCombo_->currentData().toString();
+        const bool twoPass = (picked == QLatin1String("bidi_2pass"));
+        const QString modeStr = twoPass ? QStringLiteral("bidi") : picked;
+        cfg_.backendOptions.insert(QStringLiteral("Volcengine/Mode"), modeStr);
+        cfg_.backendOptions.insert(QStringLiteral("Volcengine/EnableNonstream"),
+                                    twoPass ? QStringLiteral("True") : QStringLiteral("False"));
+    }
 
     if (!cfg_.isUsable()) {
         QMessageBox::warning(this, QStringLiteral("缺少凭据"),

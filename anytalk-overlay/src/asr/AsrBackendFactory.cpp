@@ -16,6 +16,8 @@ std::unique_ptr<AsrBackend> create(const OverlayConfig &cfg, QObject *parent) {
         if (!resourceId.isEmpty()) s.resourceId = resourceId;
         const auto mode = cfg.str(QStringLiteral("Volcengine"), QStringLiteral("Mode"));
         if (!mode.isEmpty()) s.mode = mode;
+        s.enableNonstream = cfg.boolean(QStringLiteral("Volcengine"),
+                                         QStringLiteral("EnableNonstream"), false);
 
         if (s.appId.isEmpty() || s.accessToken.isEmpty()) {
             qWarning() << "asr::create: Volcengine credentials missing — open SettingsDialog.";

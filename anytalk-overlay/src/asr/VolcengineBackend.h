@@ -22,7 +22,16 @@ public:
         QString appId;
         QString accessToken;
         QString resourceId = QStringLiteral("volc.seedasr.sauc.duration");
+        // Wire-level mode passed to the SAUC endpoint: "bidi" | "bidi_async"
+        // | "nostream". The SettingsDialog combobox exposes a fourth UI-only
+        // synthetic key "bidi_2pass" which is split into mode="bidi" plus
+        // enableNonstream=true on save — that key never reaches this struct.
         QString mode = QStringLiteral("bidi_async");
+        // Two-pass: bidi delivers realtime partials, finals are re-recognized
+        // via the nostream model for higher accuracy. Doubao docs note this
+        // is only supported on the optimized bidi path; the protocol layer
+        // gates the JSON insertion to enforce that server-side rule.
+        bool enableNonstream = false;
     };
 
     explicit VolcengineBackend(Settings settings, QObject *parent = nullptr);

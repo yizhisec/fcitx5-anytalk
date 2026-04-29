@@ -106,7 +106,7 @@ ParsedFrame parseServerFrame(const QByteArray &data) {
     return f;
 }
 
-QByteArray buildInitialRequestJson(const QString &mode) {
+QByteArray buildInitialRequestJson(const QString &mode, bool enableNonstream) {
     const bool isNoStream = (mode == QLatin1String("nostream"));
     QJsonObject audio{
         {"format", "pcm"}, {"rate", 16000}, {"bits", 16}, {"channel", 1}};
@@ -122,6 +122,12 @@ QByteArray buildInitialRequestJson(const QString &mode) {
         {"nbest", 1},
         {"use_vad", true},
     };
+    // Two-pass: bidi delivers realtime partials, then nostream re-recognizes
+    // each VAD-segmented utterance for higher final accuracy. Server enforces
+    // bidi-only; we still gate here so older modes aren't silently changed.
+    if (enableNonstream && mode == QLatin1String("bidi")) {
+        request.insert("enable_nonstream", true);
+    }
 
     QJsonObject root{
         {"user", QJsonObject{{"uid", "anytalk"}}},

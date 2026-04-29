@@ -24,7 +24,11 @@ struct ParsedFrame {
 
 ParsedFrame parseServerFrame(const QByteArray &data);
 
-QByteArray buildInitialRequestJson(const QString &mode);
+/// Build the initial FULL_CLIENT_REQUEST JSON. `enableNonstream` toggles
+/// Doubao's two-pass recognition (partials over bidi + finals re-run via
+/// nostream). Server-side: only honored when mode == "bidi"; ignored
+/// silently elsewhere per docs.
+QByteArray buildInitialRequestJson(const QString &mode, bool enableNonstream = false);
 
 struct AsrParseState {
     qint64 lastCommittedEndTime = -1;
