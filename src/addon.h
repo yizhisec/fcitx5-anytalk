@@ -15,10 +15,11 @@ class DBusModule;
 /// Minimal fcitx5 addon — a dumb forwarder for the anytalk-overlay process.
 ///
 /// All recording state lives in the overlay; this addon only does:
-///   1. Watch F2 / Esc globally and forward to the overlay over D-Bus
-///      (`ToggleRecording` / `CancelRecording`). The overlay
-///      decides whether each call is a no-op or an action based on its own
-///      state — we never cache it here.
+///   1. Watch F2 / Esc / Enter globally and forward to the overlay over
+///      D-Bus (`ToggleRecording` / `CancelRecording` / `StopRecording`).
+///      The overlay decides whether each call is a no-op or an action
+///      based on its own state — we never cache it here. Esc and Enter
+///      pass through to the focused app too (cancel-dialog / send-line).
 ///   2. Subscribe to the overlay's `CommitText` signal and translate it into
 ///      a single `ic->commitString(text)` on the focused input context —
 ///      the one operation that genuinely requires running inside fcitx5.

@@ -44,17 +44,21 @@ void AnyTalkEngine::handleGlobalKeyEvent(fcitx::Event &event) {
     if (keyEvent.isRelease()) return;
 
     // Dumb forward — the overlay is the state owner and decides whether each
-    // method is a no-op (idle) or an action (active session). We only swallow
-    // F2/AudioPlay, since those keys are unambiguously ours. Esc is forwarded
-    // but still passed through to the focused application so the user's
-    // natural "cancel and close dialog" expectation works. Enter is left
-    // entirely alone for now: terminals/editors use it constantly, and
-    // forwarding it used to auto-activate the overlay before shell commands
-    // like `pkill anytalk-overlay` ran.
+    // method is a no-op (idle) or an action (active session). F2/AudioPlay
+    // are swallowed (unambiguously ours); Esc and Enter are forwarded but
+    // also passed through to the focused application so the user's natural
+    // "cancel and close dialog" / "commit transcript and send the line"
+    // expectations both work. Safe to forward Enter again now that
+    // overlayCall() gates on bus->serviceOwner — no more accidental
+    // auto-activation when overlay is dead (pre-pkill freeze trigger).
     const auto sym = keyEvent.key().sym();
     if (sym == FcitxKey_F2 || sym == FcitxKey_AudioPlay) {
         overlayCall("ToggleRecording");
         keyEvent.accept();
+        return;
+    }
+    if (sym == FcitxKey_Return) {
+        overlayCall("StopRecording");
         return;
     }
     if (sym == FcitxKey_Escape) {
