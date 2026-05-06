@@ -27,6 +27,19 @@
 #  define ANYTALK_HAS_LAYER_SHELL 1
 #endif
 
+// GNOME/Mutter does not implement zwlr_layer_shell_v1 and has no plans to.
+// Binding LayerShellQt there yields a regular xdg_toplevel that mutter places
+// wherever it wants, ignoring our anchor. Detect that case and fall back to
+// the manual-position path (which works on X11/XWayland; on GNOME Wayland the
+// window degrades to a floating toplevel — best we can do without ext-layer-
+// shell support upstream).
+static bool isLayerShellViable() {
+    if (QGuiApplication::platformName() != QLatin1String("wayland")) return false;
+    const QByteArray desktop = qgetenv("XDG_CURRENT_DESKTOP").toLower();
+    if (desktop.contains("gnome") || desktop.contains("unity")) return false;
+    return true;
+}
+
 OverlayWindow::OverlayWindow(QWidget *parent) : QWidget(parent) {
     setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool);
     setAttribute(Qt::WA_TranslucentBackground);
@@ -266,7 +279,7 @@ void OverlayWindow::configureLayerShell() {
 
 void OverlayWindow::showEvent(QShowEvent *event) {
     QWidget::showEvent(event);
-    if (qgetenv("XDG_SESSION_TYPE") == "wayland") {
+    if (isLayerShellViable()) {
         configureLayerShell();
     } else {
         positionAtBottom();
@@ -275,11 +288,15 @@ void OverlayWindow::showEvent(QShowEvent *event) {
 
 void OverlayWindow::fadeIn() {
     if (!isVisible()) {
-        // Force the layer-shell surface to be re-created so the compositor
-        // re-picks the current output. Without this, the surface stays
-        // pinned to whichever output it bound to on first show — the
+        // On layer-shell, force the surface to be re-created so the
+        // compositor re-picks the current output. Without this, the surface
+        // stays pinned to whichever output it bound to on first show — the
         // overlay process is D-Bus activated and lives indefinitely.
-        if (auto *h = windowHandle()) h->destroy();
+        // On Mutter (xdg_toplevel fallback) the same trick causes the
+        // compositor to re-place the window every show, so skip it there.
+        if (isLayerShellViable()) {
+            if (auto *h = windowHandle()) h->destroy();
+        }
         fadeEffect_->setOpacity(0.0);
         show();
     }
